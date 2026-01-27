@@ -1,0 +1,24 @@
+name: frontend
+description: "Aplikasi Manual Book Data Normalizer"
+publish_to: 'none'
+
+# Tambahkan bagian ini:
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.1.0
+  file_picker: ^8.0.0
+  path_provider: ^2.1.1
+  url_launcher: ^6.3.2
+  syncfusion_flutter_pdfviewer: ^27.1.48
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
