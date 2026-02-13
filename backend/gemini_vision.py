@@ -1,261 +1,389 @@
 """
-Gemini Vision Integration for BioManual
-Hybrid approach: Gemini for content extraction + PaddleOCR for layout detection
+HYBRID PIPELINE v2 - PPStructure + PaddleOCR + OpenRouter AI
+Optimized for manual book processing
+Updated: February 11, 2026 (OpenRouter Integration)
 """
 
 import os
-import logging
 import cv2
-from PIL import Image
-from dotenv import load_dotenv
+import numpy as np
+import logging
 import google.generativeai as genai
-import json
 
-# Load environment variables
-load_dotenv()
+import requests
+from paddleocr import PaddleOCR, PPStructure
+from pathlib import Path
+from dotenv import load_dotenv
 
-logger = logging.getLogger("BioManual")
+# Configure Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class BioVisionGemini:
-    """
-    Pure Gemini Vision approach - uses Gemini for both layout and content extraction
-    """
-    def __init__(self):
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key or api_key == 'your-api-key-here':
-            logger.error("❌ GEMINI_API_KEY not set in .env file!")
-            logger.error("Please get your API key from: https://aistudio.google.com/app/apikey")
-            raise ValueError("Gemini API Key not configured")
-        
-        genai.configure(api_key=api_key)
-        model_name = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
-        self.model = genai.GenerativeModel(model_name)
-        logger.info(f"✓ Gemini Vision Engine Ready ({model_name})")
-    
-    def analyze_page(self, image_path, filename_base):
-        """
-        Analyze entire page using Gemini Vision
-        Returns: List of extracted elements with type, content, and bbox
-        """
-        # Use context manager to ensure file is closed
-        with Image.open(image_path) as img:
-            img.load()  # Load into memory so file can be closed
-        
-        prompt = """
-        Analyze this biomedical manual page and extract ALL content in reading order.
-        
-        For each element, identify:
-        1. **Type**: text, title, table, or figure
-        2. **Content**: The actual text or description
-        3. **Position**: Approximate bounding box [x1, y1, x2, y2] as percentages (0-100)
-        
-        Return ONLY valid JSON in this exact format:
-        {
-          "elements": [
-            {
-              "type": "title",
-              "content": "extracted text here",
-              "bbox": [10, 5, 90, 15]
-            },
-            {
-              "type": "text",
-              "content": "body text here",
-              "bbox": [10, 20, 90, 40]
-            }
-          ]
-        }
-        
-        Rules:
-        - Extract ALL text, even in tables and figures
-        - For tables: preserve structure with rows/columns
-        - For figures: describe what the image shows
-        - Use "title" for headings, "text" for paragraphs
-        - Return ONLY the JSON, no markdown code blocks
-        """
-        
-        try:
-            response = self.model.generate_content([prompt, img])
-            text = response.text.strip()
-            
-            # Clean up response (remove markdown code blocks if present)
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            
-            # import json (removed, using global)
-            data = json.loads(text.strip())
-            
-            elements = []
-            for idx, elem in enumerate(data.get('elements', [])):
-                elem_type = elem.get('type', 'text')
-                content = elem.get('content', '')
-                bbox = elem.get('bbox', [0, 0, 100, 100])
-                
-                # Convert percentage bbox to pixel coordinates (approximate)
-                img_width, img_height = img.size
-                x1 = int(bbox[0] * img_width / 100)
-                y1 = int(bbox[1] * img_height / 100)
-                x2 = int(bbox[2] * img_width / 100)
-                y2 = int(bbox[3] * img_height / 100)
-                
-                elements.append({
-                    "type": elem_type,
-                    "bbox": [x1, y1, x2, y2],
-                    "text": content,
-                    "confidence": 0.95,  # Gemini is highly accurate
-                    "crop_url": None,
-                    "crop_local": None
-                })
-            
-            logger.info(f"✓ Gemini extracted {len(elements)} elements")
-            return elements
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse Gemini JSON response: {e}")
-            logger.warning(f"Raw response: {response.text[:200]}...")
-            # Fallback: treat entire response as text
-            return [{
-                "type": "text",
-                "bbox": [0, 0, 100, 100],
-                "text": response.text,
-                "confidence": 0.8,
-                "crop_url": None,
-                "crop_local": None
-            }]
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            return []
+# Configure APIs
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Parse multiple models for fallback
+raw_models = os.getenv("AI_MODEL", "google/gemini-2.0-flash-exp:free")
+AI_MODELS = [m.strip() for m in raw_models.split(",") if m.strip()]
+
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+AI_AVAILABLE = False
+DIRECT_GEMINI_AVAILABLE = False
+
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        # Use a standard stable model for direct API
+        logger.info("✓ Direct Google Gemini API: Active")
+        DIRECT_GEMINI_AVAILABLE = True
+        AI_AVAILABLE = True
+    except Exception as e:
+        logger.error(f"❌ Gemini API Config Failed: {e}")
+
+if not DIRECT_GEMINI_AVAILABLE and OPENROUTER_API_KEY and OPENROUTER_API_KEY != "your_openrouter_key_here":
+    logger.info(f"✓ OpenRouter API: Active (Models: {', '.join(AI_MODELS)})")
+    AI_AVAILABLE = True
+elif not AI_AVAILABLE:
+    logger.warning("⚠️ No valid AI API Key found (OpenRouter or Gemini) - AI enhancement disabled")
 
 
 class BioVisionHybrid:
-    """
-    Hybrid approach: PaddleOCR for layout detection + Gemini for accurate content extraction
-    Best of both worlds!
-    """
     def __init__(self):
-        # Initialize Gemini
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key or api_key == 'your-api-key-here':
-            logger.error("❌ GEMINI_API_KEY not set in .env file!")
-            logger.error("Please get your API key from: https://aistudio.google.com/app/apikey")
-            raise ValueError("Gemini API Key not configured")
-        
-        genai.configure(api_key=api_key)
-        model_name = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
-        self.gemini = genai.GenerativeModel(model_name)
-        
-        # Initialize PaddleOCR for layout
-        from paddleocr import PPStructure
-        self.paddle = PPStructure(show_log=False, lang='en', enable_mkldnn=False)
-        
-        logger.info(f"✓ Hybrid Vision Engine Ready (Gemini {model_name} + PaddleOCR)")
-    
-    def scan_document(self, image_path, filename_base):
         """
-        Hybrid scanning:
-        1. PaddleOCR detects layout regions (precise bounding boxes)
-        2. Gemini extracts accurate content from each region
+        Triple-Engine Hybrid Pipeline:
+        1. PPStructure → Detect & crop tables/figures
+        2. PaddleOCR → Fast text extraction
+        3. Gemini (Direct or OpenRouter) → Text quality enhancement
         """
-        original_img = cv2.imread(image_path)
-        h, w, _ = original_img.shape
+        # 0. Initialize Gemini Direct Client (if available)
+        self.gemini_model = None
+        if DIRECT_GEMINI_AVAILABLE:
+            # User specifically requested "Flash 2.5" (likely 2.5-flash-exp)
+            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash-exp')
+
+        # 1. PPStructure for layout analysis (tables/figures)
+        logger.info("Initializing PPStructure for table/figure detection...")
+        self.layout_engine = PPStructure(
+            show_log=False,
+            image_orientation=False,
+            layout=True,
+            table=True,
+            ocr=False,
+            recovery=False
+        )
         
-        # Step 1: Get layout from PaddleOCR
-        paddle_result = self.paddle(original_img)
+        # 2. PaddleOCR for text extraction
+        logger.info("Initializing PaddleOCR for text extraction...")
+        self.ocr_engine = PaddleOCR(
+            use_angle_cls=True,
+            lang='id', # Use 'id' (Indonesian) which covers English too
+            show_log=False
+        )
         
-        if not paddle_result:
-            logger.warning("PaddleOCR found no regions, falling back to full-page Gemini")
-            return self._fallback_gemini_full_page(image_path, filename_base)
+        logger.info("✓ Hybrid Pipeline Ready (PPStructure + PaddleOCR + OpenRouter AI)")
         
-        # Sort top-to-bottom (reading order)
-        paddle_result.sort(key=lambda x: x['bbox'][1])
-        
-        extracted_elements = []
-        
-        # Step 2: For each region, use Gemini to extract content
-        for idx, region in enumerate(paddle_result):
-            region.pop('img', None)  # Remove embedded image
-            box = region['bbox']
-            region_type = region['type']  # 'text', 'title', 'table', 'figure'
-            
-            # Crop region
-            x1, y1, x2, y2 = box
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
-            
-            if x2 <= x1 or y2 <= y1:
-                continue
-            
-            crop_img_cv = original_img[y1:y2, x1:x2]
-            crop_pil = Image.fromarray(cv2.cvtColor(crop_img_cv, cv2.COLOR_BGR2RGB))
-            
-            # Step 3: Use Gemini to extract text from this region
-            text_content = self._extract_with_gemini(crop_pil, region_type)
-            
-            # Step 4: Save crop for tables/figures
-            crop_url = None
-            crop_local = None
-            if region_type in ['figure', 'table']:
-                from pathlib import Path
-                output_dir = os.path.join(os.path.dirname(image_path), "..", "output_results")
-                os.makedirs(output_dir, exist_ok=True)
-                
-                crop_fname = f"{filename_base}_{region_type}_{idx}.jpg"
-                crop_local = os.path.join(output_dir, crop_fname)
-                cv2.imwrite(crop_local, crop_img_cv)
-                crop_url = f"http://127.0.0.1:8000/output/{crop_fname}".replace("\\", "/")
-            
-            extracted_elements.append({
-                "type": region_type,
-                "bbox": box,
-                "text": text_content,
-                "confidence": 0.95,  # Gemini + Paddle = high confidence
-                "crop_url": crop_url,
-                "crop_local": crop_local
-            })
-        
-        logger.info(f"✓ Hybrid extracted {len(extracted_elements)} elements")
-        return extracted_elements
-    
-    def _extract_with_gemini(self, crop_image, region_type):
-        """Extract text from cropped region using Gemini"""
+    def remove_watermark(self, image):
+        """
+        Advanced Preprocessing: Red Channel Extraction (Tuned)
+        - Extracts the Red channel where red ink appears white
+        - Gentle thresholding to preserve faint text
+        """
         try:
-            if region_type in ['text', 'title']:
-                prompt = "Extract all text from this image. Return only the text, no formatting or explanations."
-            elif region_type == 'table':
-                prompt = "This is a table. Extract all data preserving rows and columns. Format as plain text with clear structure."
-            elif region_type == 'figure':
-                prompt = "Describe this figure/diagram in detail. What does it show? Include any text visible in the image."
-            else:
-                prompt = "Extract all text from this image."
+            if image is None: return None
             
-            response = self.gemini.generate_content([prompt, crop_image])
-            return response.text.strip()
+            # 1. Extract Red Channel
+            red_channel = image[:, :, 2]
+            
+            # 2. Adaptive Thresholding (Tuned for MAX CLEANING)
+            # C=20 is very aggressive. It removes almost all noise/watermark.
+            # BlockSize=21 is large to estimate background better.
+            # AI will fix any broken text resulting from this aggressive cleaning.
+            clean = cv2.adaptiveThreshold(
+                red_channel, 
+                255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 
+                21, 
+                20 # INCREASED from 5 to 20 to kill stubborn watermarks
+            )
+            
+            # 3. Convert back to BGR
+            clean_bgr = cv2.cvtColor(clean, cv2.COLOR_GRAY2BGR)
+            return clean_bgr
             
         except Exception as e:
-            logger.warning(f"Gemini extraction failed for {region_type}: {e}")
-            return f"[{region_type.upper()} - extraction failed]"
-    
-    def _fallback_gemini_full_page(self, image_path, filename_base):
-        """Fallback to full-page Gemini analysis if PaddleOCR fails"""
-        logger.info("Using full-page Gemini analysis as fallback")
-        gemini_only = BioVisionGemini()
-        return gemini_only.analyze_page(image_path, filename_base)
+            logger.warning(f"Preprocessing failed: {e}")
+            return image
 
+    def _smart_sort_regions(self, regions):
+        """
+        Sort regions using Y-clustering to handle multiple columns.
+        1. Sort by Y-coordinate.
+        2. Cluster regions that are roughly on the same line (within tolerance).
+        3. Sort clusters by X-coordinate (Left-to-Right).
+        """
+        if not regions: return []
+        
+        # Initial sort by Y
+        regions.sort(key=lambda x: x['bbox'][1])
+        
+        sorted_regions = []
+        current_row = [regions[0]]
+        row_y = regions[0]['bbox'][1]
+        tolerance = 20 # pixels
+        
+        for region in regions[1:]:
+            y = region['bbox'][1]
+            if abs(y - row_y) < tolerance:
+                # Same row
+                current_row.append(region)
+            else:
+                # New row
+                # Sort current row by X
+                current_row.sort(key=lambda x: x['bbox'][0])
+                sorted_regions.extend(current_row)
+                
+                # Start new row
+                current_row = [region]
+                row_y = y
+        
+        # Append last row
+        if current_row:
+            current_row.sort(key=lambda x: x['bbox'][0])
+            sorted_regions.extend(current_row)
+            
+        return sorted_regions
+    
+    def enhance_text_with_gemini(self, raw_text):
+        """
+        Use OpenRouter AI to enhance PaddleOCR text quality
+        - Tries multiple models (fallback mechanism)
+        - Only returns original text if ALL models fail
+        """
+        if not AI_AVAILABLE or not raw_text.strip():
+            return raw_text
+            
+        prompt = f"""You are a professional document digitizer.
+The following text is raw OCR output from a technical manual (Bilingual: Indonesian & English). It has broken lines and scanner noise.
 
-# Factory function to choose vision engine
-def create_vision_engine(mode='hybrid'):
-    """
-    Create vision engine based on mode
+RAW OCR INPUT:
+{raw_text}
+
+YOUR TASK:
+1. Fix broken lines (merge correctly).
+2. Fix obvious OCR character errors (e.g. '1l' -> 'll').
+3. DO NOT REWRITE OR SUMMARIZE. PROHIBITED.
+4. DO NOT ADD INFORMATION not present in the text.
+5. DO NOT REMOVE any content.
+6. Output ONLY the restored text. Matches the original content exactly.
+
+RESTORED TEXT:"""
+
+        # PRIORITIZE DIRECT GEMINI API (It's free and reliable)
+        if self.gemini_model:
+            try:
+                # logger.info("🤖 Enhancing text with Direct Google Gemini...")
+                response = self.gemini_model.generate_content(prompt)
+                enhanced = response.text.strip()
+                logger.info(f"✓ AI enhanced text quality (Success with Direct Gemini)")
+                return enhanced
+            except Exception as e:
+                logger.warning(f"Direct Gemini failed: {e}, falling back to OpenRouter...")
+
+        # Fallback to OpenRouter
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8000",
+            "X-Title": "Manual Book Data Normalization"
+        }
+
+        # Try each model in sequence
+        for model in AI_MODELS:
+            try:
+                # logger.info(f"🤖 Enhancing text with model: {model}...")
+                
+                data = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+                
+                response = requests.post(OPENROUTER_API_URL, headers=headers, json=data, timeout=30)
+                
+                if response.status_code != 200:
+                    continue
+                
+                result = response.json()
+                if 'choices' not in result or not result['choices']:
+                    continue
+                    
+                enhanced = result['choices'][0]['message']['content'].strip()
+                logger.info(f"✓ AI enhanced text quality (Success with {model})")
+                return enhanced
+                
+            except Exception as e:
+                continue
+        
+        return raw_text
     
-    Args:
-        mode: 'gemini' (pure Gemini) or 'hybrid' (Gemini + PaddleOCR)
-    
-    Returns:
-        Vision engine instance
-    """
-    if mode == 'gemini':
-        return BioVisionGemini()
-    elif mode == 'hybrid':
-        return BioVisionHybrid()
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Use 'gemini' or 'hybrid'")
+    def scan_document(self, image_path, filename_base, session_id=None):
+        logger.info(f"🔍 Scanning (Hybrid Mode): {os.path.basename(image_path)}")
+        
+        # Setup
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(backend_dir, "output_results")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 1. Preprocess
+        original_img = cv2.imread(image_path)
+        if original_img is None:
+            logger.error(f"Failed to load image: {image_path}")
+            return {"elements": [], "clean_image_path": None}
+            
+        clean_img = self.remove_watermark(original_img)
+        h, w, _ = clean_img.shape
+        
+        # Save preview
+        preview_fname = f"PREVIEW_{filename_base}.jpg"
+        preview_path = os.path.join(output_dir, preview_fname)
+        cv2.imwrite(preview_path, clean_img)
+        
+        # 2. Layout Analysis (PPStructure)
+        # This is CRITICAL for multi-column documents to get reading order right
+        logger.info("📐 Analyzing Layout (Regions)...")
+        visual_regions = []
+        raw_text_accumulated = []
+        
+        try:
+            layout_results = self.layout_engine(clean_img)
+            
+            # Use Smart Sort (Row-Major) instead of simple Y-sort
+            # This handles multi-column layouts correctly
+            layout_results = self._smart_sort_regions(layout_results)
+            
+            has_regions = len(layout_results) > 0
+            
+            if has_regions:
+                logger.info(f"✓ Found {len(layout_results)} layout regions (processing individually)")
+                
+                for idx, region in enumerate(layout_results):
+                    rtype = region.get('type', 'text')
+                    bbox = region.get('bbox', [0,0,0,0])
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    
+                    # Clamp coordinates
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    
+                    if x2 <= x1 or y2 <= y1: continue
+                    
+                    # Create crop for this region
+                    crop_img = clean_img[y1:y2, x1:x2]
+                    
+                    # BRANCH A: Visual Elements (Table/Figure)
+                    if rtype in ['table', 'figure']:
+                        crop_fname = f"{filename_base}_crop_{rtype}_{idx}.png"
+                        crop_path = os.path.join(output_dir, crop_fname)
+                        cv2.imwrite(crop_path, crop_img)
+                        
+                        visual_regions.append({
+                            "type": rtype,
+                            "bbox": [x1, y1, x2, y2],
+                            "crop_url": f"http://127.0.0.1:8000/output/{crop_fname}",
+                            "crop_local": crop_path
+                        })
+                    
+                    # BRANCH B: Text Elements (Text, Title, List, Header, Footer)
+                    else:
+                        # Region-based OCR
+                        # Optimization: cls=False for speed (assume text is upright in regions)
+                        try:
+                            # Show progress in terminal
+                            print(f"    Processing region {idx+1}/{len(layout_results)}...", end='\r')
+                            
+                            # Run OCR on the crop
+                            # cls=False saves ~300ms per region
+                            block_ocr = self.ocr_engine.ocr(crop_img, cls=False)
+                            
+                            if block_ocr and block_ocr[0]:
+                                for line in block_ocr[0]:
+                                    text = line[1][0]
+                                    conf = line[1][1]
+                                    
+                                    # Append text directly. We trust the region sort order.
+                                    raw_text_accumulated.append(text)
+                                    
+                        except Exception as e_ocr:
+                            logger.warning(f"Region OCR failed: {e_ocr}")
+
+            else:
+                logger.warning("No layout regions found. Falling back to global OCR.")
+                # Fallback: Global OCR (old behavior)
+                ocr_results = self.ocr_engine.ocr(clean_img)
+                if ocr_results and ocr_results[0]:
+                    lines = sorted(ocr_results[0], key=lambda x: x[0][0][1]) # Sort by Y
+                    for line in lines:
+                        raw_text_accumulated.append(line[1][0])
+
+        except Exception as e:
+            logger.error(f"Layout analysis failed: {e}")
+            # Fallback on crash
+            ocr_results = self.ocr_engine.ocr(clean_img)
+            if ocr_results and ocr_results[0]:
+                for line in ocr_results[0]:
+                    raw_text_accumulated.append(line[1][0])
+            
+        
+        # 3. Concatenate Text
+        raw_text = "\n".join(raw_text_accumulated)
+        
+        # 4. AI: Enhance text quality
+        logger.info("🤖 AI enhancing text quality...")
+        enhanced_text = self.enhance_text_with_gemini(raw_text)
+        
+        # 5. Build final elements
+        final_elements = []
+        
+        # Add enhanced text as paragraphs
+        if enhanced_text:
+            paragraphs = [p.strip() for p in enhanced_text.split('\n\n') if p.strip()]
+            for para in paragraphs:
+                is_heading = (
+                    len(para) < 100 and
+                    (para.isupper() or
+                     para.startswith(('BAB', 'CHAPTER', 'SECTION')) or
+                     any(para.startswith(f'{i}.') for i in range(1, 10)))
+                )
+                
+                final_elements.append({
+                    "type": "heading" if is_heading else "paragraph",
+                    "text": para,
+                    "confidence": 0.95,
+                    "bbox": [0, 0, w, h], # Global bbox for now
+                    "crop_url": None,
+                    "crop_local": None
+                })
+        
+        # Add visual elements
+        for visual in visual_regions:
+            final_elements.append({
+                "type": visual['type'],
+                "text": f"[{visual['type'].upper()}]",
+                "confidence": 0.95,
+                "bbox": visual['bbox'],
+                "crop_url": visual['crop_url'],
+                "crop_local": visual['crop_local']
+            })
+        
+        logger.info(f"✅ Total: {len(final_elements)} elements ({len(visual_regions)} visuals)")
+        
+        return {
+            "elements": final_elements,
+            "clean_image_path": preview_path
+        }
+
+# Factory Function
+def create_vision_engine(**kwargs):
+    return BioVisionHybrid()

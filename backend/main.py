@@ -583,6 +583,9 @@ async def process_workflow(file: UploadFile = File(...)):
         else:
             images = [temp_path]
         
+        # Initialize list to store cleaned page URLs for frontend preview
+        clean_pages_urls = []
+        
         total_pages = len(images)
         progress_tracker[session_id]["total_pages"] = total_pages
         progress_tracker[session_id]["message"] = f"Processing {total_pages} page(s)..."
@@ -608,7 +611,24 @@ async def process_workflow(file: UploadFile = File(...)):
                 img_src.save(page_path, "PNG")
 
             # A. THE EYE (Scan)
-            layout_elements = vision_module.scan_document(page_path, f"{file.filename}_{i}")
+            # Returns dict: {'elements': [], 'clean_image_path': 'path/to/img.jpg'}
+            scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}")
+            
+            # Handle return format (Backward compatibility check)
+            if isinstance(scan_result, list):
+                layout_elements = scan_result
+                clean_img_url = None
+            else:
+                layout_elements = scan_result.get('elements', [])
+                clean_path = scan_result.get('clean_image_path')
+                
+                # Convert path to URL
+                if clean_path and os.path.exists(clean_path):
+                     fname = os.path.basename(clean_path)
+                     clean_img_url = f"http://127.0.0.1:8000/output/{fname}"
+                     clean_pages_urls.append(clean_img_url)
+                else:
+                     clean_img_url = None
             
             # B. THE BRAIN (Classify)
             for element in layout_elements:
@@ -675,7 +695,8 @@ async def process_workflow(file: UploadFile = File(...)):
             "results": structured_data,
             "word_url": word_url,
             "pdf_url": pdf_url,
-            "total_pages": progress_tracker[session_id]["total_pages"]
+            "total_pages": progress_tracker[session_id]["total_pages"],
+            "clean_pages": clean_pages_urls # NEW: List of cleaned page URLs
         }
 
     except Exception as e:
