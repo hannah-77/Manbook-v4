@@ -528,6 +528,8 @@ architect_module = BioArchitect()
 
 # Progress tracking
 progress_tracker = {}
+# Session Data Storage (for Supplementary Uploads)
+active_sessions = {}
 
 @app.get("/health")
 def health():
@@ -703,6 +705,140 @@ async def process_workflow(file: UploadFile = File(...)):
         logger.error(f"Workflow Failed: {e}")
         import traceback
         traceback.print_exc()
+        return {"success": False, "error": str(e)}
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        # Store session data for potential supplementary uploads
+        if structured_data and session_id:
+             active_sessions[session_id] = {
+                 "original_filename": file.filename,
+                 "structured_data": structured_data,
+                 "images_count": len(images) if 'images' in locals() else 0
+             }
+
+@app.post("/supplement/{session_id}")
+async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
+    """
+    Endpoint untuk mengupload file tambahan ke sesi yang sudah ada.
+    Menggabungkan hasil ekstraksi baru dengan yang lama.
+    """
+    if session_id not in active_sessions:
+        return {"success": False, "error": "Session ID not found or expired"}
+    
+    existing_session = active_sessions[session_id]
+    original_data = existing_session["structured_data"]
+    base_filename = existing_session["original_filename"]
+    
+    logger.info(f"Supplementing Session {session_id} with file: {file.filename}")
+    
+    temp_path = os.path.join(BASE_PATH, f"temp_supp_{file.filename}")
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    supplementary_data = []
+    
+    # Initialize separate progress for supplement (or update existing?)
+    # For now, let's update the existing session's progress to show activity
+    progress_tracker[session_id].update({
+        "status": "processing_supplement",
+        "message": f"Processing supplementary file: {file.filename}..."
+    })
+
+    try:
+        # STEP 1: IMAGE CONVERSION (Reuse logic)
+        images = []
+        if file.filename.lower().endswith('.pdf'):
+            images = convert_pdf_to_images_safe(temp_path)
+        else:
+            images = [temp_path]
+            
+        total_pages = len(images)
+        current_page_offset = existing_session.get("images_count", 0) + 1
+        
+        # STEP 2: LOOP & PROCESS
+        for i, img_src in enumerate(images):
+            # Resolve image path
+            page_path = img_src
+            if not isinstance(img_src, str):
+                page_path = os.path.join(BASE_PATH, f"supp_{session_id}_{i}.png")
+                img_src.save(page_path, "PNG")
+
+            # A. THE EYE (Scan)
+            scan_result = vision_module.scan_document(page_path, f"supp_{file.filename}_{i}")
+            
+            if isinstance(scan_result, list):
+                layout_elements = scan_result
+            else:
+                layout_elements = scan_result.get('elements', [])
+            
+            # B. THE BRAIN (Classify)
+            # Re-initialize Brain module for fresh context?? 
+            # Actually, we might want to pass previous context if we were smart, 
+            # but for now let's just treat it as new chunks that will be appended.
+            brain_module = BioBrain() 
+            
+            for element in layout_elements:
+                normalized_result = brain_module.normalize_text(element['text'])
+                element['text'] = normalized_result['corrected']
+                bab_id, bab_title = brain_module.semantic_mapping(element)
+                
+                supplementary_data.append({
+                    "chapter_id": bab_id,
+                    "chapter_title": bab_title,
+                    "type": element['type'],
+                    "original": normalized_result['original'],
+                    "normalized": normalized_result['corrected'],
+                    "typos": normalized_result['typos'],
+                    "has_typo": normalized_result['has_typo'],
+                    "text_confidence": normalized_result['confidence'],
+                    "match_score": 100,
+                    "crop_url": element['crop_url'],
+                    "crop_local": element['crop_local']
+                })
+            
+            # Cleanup
+            import time
+            if not isinstance(img_src, str):
+                 try:
+                     if os.path.exists(page_path):
+                         os.remove(page_path)
+                 except: pass
+
+        # STEP 3: MERGE & RE-BUILD
+        combined_data = original_data + supplementary_data
+        
+        # Sort headers? No, append is safer for now unless we have page numbers. 
+        # Ideally user uploads Part 1 then Part 2.
+        
+        # Update session data
+        active_sessions[session_id]["structured_data"] = combined_data
+        active_sessions[session_id]["images_count"] += total_pages
+        
+        # Re-run Architect
+        progress_tracker[session_id]["message"] = "Regenerating reports with merged data..."
+        result = architect_module.build_report(combined_data, base_filename) # Keep original filename as base
+        
+        word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
+        pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result['pdf_file'] else None
+        
+        progress_tracker[session_id].update({
+            "status": "complete",
+            "message": "Supplementary merge complete!"
+        })
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "results": combined_data,
+            "word_url": word_url,
+            "pdf_url": pdf_url,
+            "total_pages": active_sessions[session_id]["images_count"]
+        }
+
+    except Exception as e:
+        logger.error(f"Supplement Workflow Failed: {e}")
         return {"success": False, "error": str(e)}
     finally:
         if os.path.exists(temp_path):

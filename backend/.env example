@@ -1,0 +1,30 @@
+# ========================================
+# Manbook-v4 Configuration
+# Updated: 2026-02-11 (OpenRouter Integration)
+# ========================================
+
+# Vision Mode
+# Options: hybrid (recommended), gemini, paddle
+VISION_MODE=hybrid
+
+# OpenRouter API Configuration
+# Get your API key from: https://openrouter.ai/keys
+OPENROUTER_API_KEY=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
+
+# [OPTIONAL] Direct Google Gemini API (Free Tier is generous)
+# Get key here: https://aistudio.google.com/app/apikey
+# GEMINI_API_KEY=AIzaSyBSf76w5I5fjeM6VeqmOhIE3Ex-nyaAPfI
+
+# AI Model Selection (via OpenRouter)
+# You can specify multiple models separated by comma for fallback
+# Example: primary_model,fallback_model1,fallback_model2
+#
+# Recommended Setup:
+# 1. google/gemini-2.0-flash-exp:free (Free, fast)
+# 2. google/gemini-flash-1.5 (Backup free)
+# 3. openai/gpt-4o-mini (Cheap, fast)
+AI_MODEL=google/gemini-2.0-flash-exp:free,google/gemini-2.0-pro-exp-02-05:free,openai/gpt-4o-mini,tngtech/deepseek-r1t2-chimera:free,deepseek/deepseek-r1-0528:free,openai/gpt-oss-120b:free,openai/gpt-oss-20b:free,google/gemma-3-27b-it:free,
+
+# Output Format
+# Options: page (per-page output), chapter (per-chapter output - default)
+OUTPUT_FORMAT=chapter
