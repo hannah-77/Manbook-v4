@@ -25,7 +25,7 @@ try:
     print(f"\nFound {len(found_models)} text-generation models.")
             
     # Try 1.5 Flash which has 1500 RPD free limit (vs 20 for Pro/Newer models)
-    model_name = 'gemini-2.5-flash'
+    model_name = 'gemini-2.0-flash'
     print(f"\nTesting connection with {model_name} (High Limit Model)...")
     model = genai.GenerativeModel(model_name)
     response = model.generate_content("Say 'Gemini 2.5 Flash is Working'")

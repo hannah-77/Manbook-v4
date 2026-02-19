@@ -16,3 +16,4 @@ pyspellchecker
 docx2pdf
 google-generativeai
 python-dotenv
+openai

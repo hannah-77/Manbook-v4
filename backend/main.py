@@ -486,18 +486,8 @@ class BioArchitect:
         doc.save(word_path)
         logger.info(f"✓ Word file saved: {word_filename}")
         
-        # ===== EXPORT TO PDF =====
-        pdf_filename = f"Standardized_{Path(original_filename).stem}.pdf"
-        pdf_path = os.path.join(BASE_PATH, pdf_filename)
-        
-        try:
-            from docx2pdf import convert
-            convert(word_path, pdf_path)
-            logger.info(f"✓ PDF exported: {pdf_filename}")
-        except Exception as e:
-            logger.warning(f"PDF export failed (docx2pdf not available): {e}")
-            logger.info("Tip: Install Microsoft Word or use alternative PDF converter")
-            pdf_filename = None
+        # PDF Export disabled to prevent auto-opening Word
+        pdf_filename = None
         
         return {
             "word_file": word_filename,
@@ -672,6 +662,56 @@ async def process_workflow(file: UploadFile = File(...)):
                     except Exception:
                          pass
 
+
+        # 2.5 CHECK MISSING CHAPTERS (Auto-Fill)
+        existing_chapters = set(item['chapter_id'] for item in structured_data)
+        
+        # Check for missing Maintenance Chapter (BAB 4)
+        if "BAB 4" not in existing_chapters and hasattr(vision_module, 'generate_chapter_content'):
+            logger.info("⚠️ BAB 4 (Maintenance) is missing. Attempting AI generation...")
+            
+            progress_tracker[session_id].update({
+                "message": "Generating missing Maintenance Chapter (AI)..."
+            })
+            
+            # Context Extraction (Product Knowledge)
+            # Aggregate text from BAB 1 (Info) and BAB 2 (Installation)
+            context_text = []
+            for item in structured_data:
+                if item['chapter_id'] in ["BAB 1", "BAB 2"]:
+                    context_text.append(item['normalized'])
+            
+            product_context = "\n".join(context_text[:50]) # Limit context to first 50 paragraphs to avoid token limits
+            
+            # Generate Logic
+            generated_content = vision_module.generate_chapter_content(
+                topic="BAB 4: Perawatan, Pemeliharaan & Pembersihan",
+                context=product_context
+            )
+            
+            if generated_content and not generated_content.startswith("["):
+                 # Parse paragraphs
+                 lines = generated_content.split('\n')
+                 for line in lines:
+                     if not line.strip(): continue
+                     
+                     is_heading = line.strip().isupper() or line.startswith('#') or line.startswith('**')
+                     
+                     structured_data.append({
+                        "chapter_id": "BAB 4",
+                        "chapter_title": BioBrain().taxonomy["BAB 4"]["title"],
+                        "type": "title" if is_heading else "text",
+                        "original": line,
+                        "normalized": line.replace('**','').replace('#','').strip(),
+                        "typos": [],
+                        "has_typo": False,
+                        "text_confidence": 0.9,
+                        "match_score": 100,
+                        "crop_url": None,
+                        "crop_local": None
+                    })
+                 logger.info("✓ BAB 4 generated successfully.")
+
         # STEP 3: THE ARCHITECT (Build)
         progress_tracker[session_id].update({
             "status": "building",
@@ -698,7 +738,8 @@ async def process_workflow(file: UploadFile = File(...)):
             "word_url": word_url,
             "pdf_url": pdf_url,
             "total_pages": progress_tracker[session_id]["total_pages"],
-            "clean_pages": clean_pages_urls # NEW: List of cleaned page URLs
+            "clean_pages": clean_pages_urls, # NEW: List of cleaned page URLs
+            "missing_chapters": list(set(["BAB 1", "BAB 2", "BAB 3", "BAB 4", "BAB 5", "BAB 6", "BAB 7"]) - existing_chapters)
         }
 
     except Exception as e:
@@ -834,7 +875,8 @@ async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
             "results": combined_data,
             "word_url": word_url,
             "pdf_url": pdf_url,
-            "total_pages": active_sessions[session_id]["images_count"]
+            "total_pages": active_sessions[session_id]["images_count"],
+            "missing_chapters": list(set(["BAB 1", "BAB 2", "BAB 3", "BAB 4", "BAB 5", "BAB 6", "BAB 7"]) - set(item['chapter_id'] for item in combined_data))
         }
 
     except Exception as e:

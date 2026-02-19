@@ -61,7 +61,7 @@ class BioVisionHybrid:
         self.gemini_model = None
         if DIRECT_GEMINI_AVAILABLE:
             # User specifically requested "Flash 2.5" (likely 2.5-flash-exp)
-            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash-exp')
+            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 
         # 1. PPStructure for layout analysis (tables/figures)
         logger.info("Initializing PPStructure for table/figure detection...")
@@ -183,16 +183,31 @@ RESTORED TEXT:"""
 
         # PRIORITIZE DIRECT GEMINI API (It's free and reliable)
         if self.gemini_model:
-            try:
-                # logger.info("🤖 Enhancing text with Direct Google Gemini...")
-                response = self.gemini_model.generate_content(prompt)
-                enhanced = response.text.strip()
-                logger.info(f"✓ AI enhanced text quality (Success with Direct Gemini)")
-                return enhanced
-            except Exception as e:
-                logger.warning(f"Direct Gemini failed: {e}, falling back to OpenRouter...")
+            import time
+            for attempt in range(3): # Retry up to 3 times for Quota errors
+                try:
+                    # logger.info("🤖 Enhancing text with Direct Google Gemini...")
+                    response = self.gemini_model.generate_content(prompt)
+                    enhanced = response.text.strip()
+                    logger.info(f"✓ AI enhanced text quality (Success with Direct Gemini)")
+                    return enhanced
+                except Exception as e:
+                    if "429" in str(e) or "Quota" in str(e):
+                         if attempt < 2:
+                             wait_time = 2 * (attempt + 1)
+                             logger.warning(f"Gemini Quota Exceeded (429). Retrying in {wait_time}s...")
+                             time.sleep(wait_time)
+                             continue
+                    
+                    logger.warning(f"Direct Gemini failed: {e}")
+                    break # Don't retry for non-429 errors or after attempts exhausted
 
-        # Fallback to OpenRouter
+        # Fallback to OpenRouter (ONLY IF KEY EXISTS)
+        if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("sk-or-v1-"):
+             # If no valid key, just return original text
+             logger.warning("⚠️ AI Enhancement skipped (Gemini failed & OpenRouter disabled)")
+             return raw_text
+
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
@@ -227,6 +242,63 @@ RESTORED TEXT:"""
                 continue
         
         return raw_text
+    
+    def generate_chapter_content(self, topic, context=""):
+        """
+        Generate content for valid missing chapters (e.g. BAB 4 Maintenance).
+        Uses context from other chapters to make it product-specific.
+        """
+        if not AI_AVAILABLE:
+            return f"[AI GENERATION FAILED] No AI API Key configured. Please add OPENROUTER_API_KEY or GEMINI_API_KEY to .env to generate {topic}."
+
+        prompt = f"""You are a professional technical writer for medical device manuals.
+The user's manual is missing '{topic}'. 
+        
+PRODUCT CONTEXT (From other chapters):
+{context}
+
+YOUR TASK:
+1. Write a comprehensive, professional '{topic}' section for THIS SPECIFIC PRODUCT.
+2. detailed steps, warnings, and best practices.
+3. If the product context is vague, write a high-quality standard guide for this type of medical equipment.
+4. Use standard technical language (Indonesian).
+5. Format with clear headings and bullet points.
+6. Do NOT mention that this is AI-generated. Write it as if it belongs in the original manual.
+"""
+        
+        logger.info(f"🤖 Generating missing chapter: {topic} (Context length: {len(context)})")
+
+        # 1. Try Gemini Direct
+        if self.gemini_model:
+            try:
+                response = self.gemini_model.generate_content(prompt)
+                return response.text.strip()
+            except Exception as e:
+                logger.warning(f"Gemini generation failed: {e}")
+
+        # 2. Try OpenRouter
+        if OPENROUTER_API_KEY and not OPENROUTER_API_KEY.startswith("sk-or-v1-"):
+             headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "BioManual Generator"
+            }
+             
+             for model in AI_MODELS:
+                try:
+                    data = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}]
+                    }
+                    response = requests.post(OPENROUTER_API_URL, headers=headers, json=data, timeout=60)
+                    if response.status_code == 200:
+                        result = response.json()
+                        if 'choices' in result:
+                            return result['choices'][0]['message']['content'].strip()
+                except: continue
+
+        return f"[GENERATION FAILED] Could not generate {topic}. Please check internet connection or API Quota."
     
     def scan_document(self, image_path, filename_base, session_id=None):
         logger.info(f"🔍 Scanning (Hybrid Mode): {os.path.basename(image_path)}")
