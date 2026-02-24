@@ -1,47 +1,26 @@
-import os
-import requests
-from dotenv import load_dotenv
+"""
+check_openrouter.py — Test koneksi OpenRouter
+Jalankan ini untuk memastikan API key, model, dan provider berfungsi.
 
-# Load environment variables
-load_dotenv()
+Cara pakai:
+  python check_openrouter.py
+"""
+import logging
+logging.basicConfig(level=logging.WARNING)
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-AI_MODELS = os.getenv("AI_MODEL", "").split(",")
+from openrouter_client import get_openrouter_client
 
-print(f"🔑 OpenRouter API Key: {OPENROUTER_API_KEY[:5]}...{OPENROUTER_API_KEY[-4:] if OPENROUTER_API_KEY else 'None'}")
-print(f"🤖 Configured Models: {AI_MODELS}")
+if __name__ == "__main__":
+    client = get_openrouter_client()
 
-if not OPENROUTER_API_KEY:
-    print("❌ No OPENROUTER_API_KEY found in .env")
-    exit(1)
+    if not client.is_available:
+        print("\n❌ OPENROUTER_API_KEY tidak ditemukan di .env!")
+        exit(1)
 
-url = "https://openrouter.ai/api/v1/chat/completions"
-headers = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "Content-Type": "application/json",
-    "HTTP-Referer": "http://localhost:8000",
-    "X-Title": "BioManual Test"
-}
+    key_preview = client.api_key[:10] + "..." + client.api_key[-4:]
+    print(f"\n🔑 API Key : {key_preview}")
+    print(f"🤖 Model   : {client.model}")
+    print(f"🏭 Provider: {client.provider}")
+    print(f"↩  Fallback: {client.allow_fallbacks}")
 
-for model in AI_MODELS:
-    model = model.strip()
-    if not model: continue
-    
-    print(f"\nTesting Model: {model}...")
-    data = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": "Say 'OpenRouter Connected'"}
-        ]
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        if response.status_code == 200:
-            result = response.json()
-            content = result['choices'][0]['message']['content']
-            print(f"✅ Success! Response: {content}")
-        else:
-            print(f"❌ Failed (Status {response.status_code}): {response.text}")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    client.test_connection()

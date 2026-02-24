@@ -1,68 +1,43 @@
 """
-HYBRID PIPELINE v2 - PPStructure + PaddleOCR + OpenRouter AI
+HYBRID PIPELINE v3 - PPStructure + PaddleOCR + OpenRouter AI
 Optimized for manual book processing
-Updated: February 11, 2026 (OpenRouter Integration)
+Updated: February 2026 (Full OpenRouter — no Gemini)
 """
 
 import os
 import cv2
 import numpy as np
 import logging
-import google.generativeai as genai
 
-import requests
 from paddleocr import PaddleOCR, PPStructure
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Import OpenRouter Smart Client
+from openrouter_client import get_openrouter_client
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure APIs
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Inisialisasi OpenRouter Client (satu-satunya AI provider)
+openrouter = get_openrouter_client()
+AI_AVAILABLE = openrouter.is_available
 
-# Parse multiple models for fallback
-raw_models = os.getenv("AI_MODEL", "google/gemini-2.0-flash-exp:free")
-AI_MODELS = [m.strip() for m in raw_models.split(",") if m.strip()]
-
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-AI_AVAILABLE = False
-DIRECT_GEMINI_AVAILABLE = False
-
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        # Use a standard stable model for direct API
-        logger.info("✓ Direct Google Gemini API: Active")
-        DIRECT_GEMINI_AVAILABLE = True
-        AI_AVAILABLE = True
-    except Exception as e:
-        logger.error(f"❌ Gemini API Config Failed: {e}")
-
-if not DIRECT_GEMINI_AVAILABLE and OPENROUTER_API_KEY and OPENROUTER_API_KEY != "your_openrouter_key_here":
-    logger.info(f"✓ OpenRouter API: Active (Models: {', '.join(AI_MODELS)})")
-    AI_AVAILABLE = True
-elif not AI_AVAILABLE:
-    logger.warning("⚠️ No valid AI API Key found (OpenRouter or Gemini) - AI enhancement disabled")
+if AI_AVAILABLE:
+    logger.info("✓ OpenRouter Client: Active")
+else:
+    logger.warning("⚠️ OpenRouter tidak tersedia — AI enhancement dinonaktifkan")
 
 
 class BioVisionHybrid:
     def __init__(self):
         """
-        Triple-Engine Hybrid Pipeline:
+        Hybrid Pipeline:
         1. PPStructure → Detect & crop tables/figures
         2. PaddleOCR → Fast text extraction
-        3. Gemini (Direct or OpenRouter) → Text quality enhancement
+        3. OpenRouter AI → Text quality enhancement
         """
-        # 0. Initialize Gemini Direct Client (if available)
-        self.gemini_model = None
-        if DIRECT_GEMINI_AVAILABLE:
-            # User specifically requested "Flash 2.5" (likely 2.5-flash-exp)
-            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
-
         # 1. PPStructure for layout analysis (tables/figures)
         logger.info("Initializing PPStructure for table/figure detection...")
         self.layout_engine = PPStructure(
@@ -78,7 +53,7 @@ class BioVisionHybrid:
         logger.info("Initializing PaddleOCR for text extraction...")
         self.ocr_engine = PaddleOCR(
             use_angle_cls=True,
-            lang='id', # Use 'id' (Indonesian) which covers English too
+            lang='id',
             show_log=False
         )
         
@@ -86,32 +61,55 @@ class BioVisionHybrid:
         
     def remove_watermark(self, image):
         """
-        Advanced Preprocessing: Red Channel Extraction (Tuned)
-        - Extracts the Red channel where red ink appears white
-        - Gentle thresholding to preserve faint text
+        Advanced Preprocessing: HSV Color Filtering
+        - Identifies Red/Pink watermarks using HSV color space
+        - Turns them WHITE before thresholding to avoid 'black line' artifacts
         """
         try:
             if image is None: return None
             
-            # 1. Extract Red Channel
-            red_channel = image[:, :, 2]
+            # 1. Convert to HSV
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             
-            # 2. Adaptive Thresholding (Tuned for MAX CLEANING)
-            # C=20 is very aggressive. It removes almost all noise/watermark.
-            # BlockSize=21 is large to estimate background better.
-            # AI will fix any broken text resulting from this aggressive cleaning.
-            clean = cv2.adaptiveThreshold(
-                red_channel, 
+            # 2. Define Red Color Ranges (Red wraps around 0/180)
+            # Range 1: 0-10 (Red)
+            lower_red1 = np.array([0, 30, 30])
+            upper_red1 = np.array([10, 255, 255])
+            
+            # Range 2: 170-180 (Red/Pink)
+            lower_red2 = np.array([170, 30, 30])
+            upper_red2 = np.array([180, 255, 255])
+            
+            # 3. Create Masks
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            watermark_mask = mask1 + mask2
+            
+            # 4. Dilate mask to cover anti-aliased edges (The "Black Line" killer)
+            kernel = np.ones((3,3), np.uint8)
+            dilated_mask = cv2.dilate(watermark_mask, kernel, iterations=1)
+            
+            # 5. Inpaint / Turn White
+            # We copy the image to avoid modifying the original source
+            clean_color = image.copy()
+            # Set watermark pixels to pure white
+            clean_color[dilated_mask > 0] = (255, 255, 255)
+            
+            # 6. Convert to Grayscale & Threshold (for OCR)
+            gray = cv2.cvtColor(clean_color, cv2.COLOR_BGR2GRAY)
+            
+            # Gentle Threshold to preserve text
+            clean_binary = cv2.adaptiveThreshold(
+                gray, 
                 255, 
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY, 
-                21, 
-                20 # INCREASED from 5 to 20 to kill stubborn watermarks
+                15, # Block size
+                10  # Constant
             )
             
-            # 3. Convert back to BGR
-            clean_bgr = cv2.cvtColor(clean, cv2.COLOR_GRAY2BGR)
-            return clean_bgr
+            # Return as BGR (3 channels) for consistency
+            return cv2.cvtColor(clean_binary, cv2.COLOR_GRAY2BGR)
             
         except Exception as e:
             logger.warning(f"Preprocessing failed: {e}")
@@ -158,147 +156,80 @@ class BioVisionHybrid:
     
     def enhance_text_with_gemini(self, raw_text):
         """
-        Use OpenRouter AI to enhance PaddleOCR text quality
-        - Tries multiple models (fallback mechanism)
-        - Only returns original text if ALL models fail
+        Gunakan OpenRouter untuk enhance kualitas teks OCR.
+        Timeout pendek agar tidak hang. Fallback ke teks mentah jika gagal.
         """
         if not AI_AVAILABLE or not raw_text.strip():
             return raw_text
-            
-        prompt = f"""You are a professional document digitizer.
-The following text is raw OCR output from a technical manual (Bilingual: Indonesian & English). It has broken lines and scanner noise.
 
-RAW OCR INPUT:
-{raw_text}
+        # Skip enhance jika teks terlalu pendek (tidak worth API call)
+        if len(raw_text.strip()) < 50:
+            return raw_text
 
-YOUR TASK:
-1. Fix broken lines (merge correctly).
-2. Fix obvious OCR character errors (e.g. '1l' -> 'll').
-3. DO NOT REWRITE OR SUMMARIZE. PROHIBITED.
-4. DO NOT ADD INFORMATION not present in the text.
-5. DO NOT REMOVE any content.
-6. Output ONLY the restored text. Matches the original content exactly.
+        # Batasi panjang teks yang dikirim (max 3000 char) agar respons cepat
+        text_to_enhance = raw_text.strip()[:3000]
+        if len(raw_text.strip()) > 3000:
+            tail = raw_text.strip()[3000:]
+        else:
+            tail = ""
 
-RESTORED TEXT:"""
+        # Timeout dari .env, default 20 detik
+        enhance_timeout = int(os.getenv("AI_ENHANCE_TIMEOUT", "20"))
 
-        # PRIORITIZE DIRECT GEMINI API (It's free and reliable)
-        if self.gemini_model:
-            import time
-            for attempt in range(3): # Retry up to 3 times for Quota errors
-                try:
-                    # logger.info("🤖 Enhancing text with Direct Google Gemini...")
-                    response = self.gemini_model.generate_content(prompt)
-                    enhanced = response.text.strip()
-                    logger.info(f"✓ AI enhanced text quality (Success with Direct Gemini)")
-                    return enhanced
-                except Exception as e:
-                    if "429" in str(e) or "Quota" in str(e):
-                         if attempt < 2:
-                             wait_time = 2 * (attempt + 1)
-                             logger.warning(f"Gemini Quota Exceeded (429). Retrying in {wait_time}s...")
-                             time.sleep(wait_time)
-                             continue
-                    
-                    logger.warning(f"Direct Gemini failed: {e}")
-                    break # Don't retry for non-429 errors or after attempts exhausted
+        prompt = f"""Fix OCR errors in this technical manual text (Indonesian/English). 
+Rules: fix broken lines, fix character errors (l→1, O→0 in numbers). DO NOT add/remove content.
+Output ONLY the fixed text.
 
-        # Fallback to OpenRouter (ONLY IF KEY EXISTS)
-        if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("sk-or-v1-"):
-             # If no valid key, just return original text
-             logger.warning("⚠️ AI Enhancement skipped (Gemini failed & OpenRouter disabled)")
-             return raw_text
+TEXT:
+{text_to_enhance}
 
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:8000",
-            "X-Title": "Manual Book Data Normalization"
-        }
+FIXED TEXT:"""
 
-        # Try each model in sequence
-        for model in AI_MODELS:
-            try:
-                # logger.info(f"🤖 Enhancing text with model: {model}...")
-                
-                data = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-                
-                response = requests.post(OPENROUTER_API_URL, headers=headers, json=data, timeout=30)
-                
-                if response.status_code != 200:
-                    continue
-                
-                result = response.json()
-                if 'choices' not in result or not result['choices']:
-                    continue
-                    
-                enhanced = result['choices'][0]['message']['content'].strip()
-                logger.info(f"✓ AI enhanced text quality (Success with {model})")
-                return enhanced
-                
-            except Exception as e:
-                continue
-        
+        # OpenRouter only
+        if openrouter.is_available:
+            result = openrouter.call(prompt, timeout=enhance_timeout)
+            if result:
+                return result + ("\n" + tail if tail else "")
+
+        # Fallback: return raw OCR text (no Gemini)
+        logger.info("OpenRouter unavailable — using raw OCR text")
         return raw_text
     
     def generate_chapter_content(self, topic, context=""):
         """
-        Generate content for valid missing chapters (e.g. BAB 4 Maintenance).
-        Uses context from other chapters to make it product-specific.
+        Generate konten untuk chapter yang hilang (e.g. BAB 4 Maintenance).
+        Gunakan mode smart untuk output yang lebih berkualitas.
         """
         if not AI_AVAILABLE:
-            return f"[AI GENERATION FAILED] No AI API Key configured. Please add OPENROUTER_API_KEY or GEMINI_API_KEY to .env to generate {topic}."
+            return (
+                f"[AI GENERATION FAILED] Tidak ada API Key AI yang aktif. "
+                f"Tambahkan OPENROUTER_API_KEY di .env untuk generate {topic}."
+            )
 
         prompt = f"""You are a professional technical writer for medical device manuals.
-The user's manual is missing '{topic}'. 
-        
+The user's manual is missing '{topic}'.
+
 PRODUCT CONTEXT (From other chapters):
 {context}
 
 YOUR TASK:
 1. Write a comprehensive, professional '{topic}' section for THIS SPECIFIC PRODUCT.
-2. detailed steps, warnings, and best practices.
+2. Include detailed steps, warnings, and best practices.
 3. If the product context is vague, write a high-quality standard guide for this type of medical equipment.
 4. Use standard technical language (Indonesian).
 5. Format with clear headings and bullet points.
 6. Do NOT mention that this is AI-generated. Write it as if it belongs in the original manual.
 """
-        
-        logger.info(f"🤖 Generating missing chapter: {topic} (Context length: {len(context)})")
 
-        # 1. Try Gemini Direct
-        if self.gemini_model:
-            try:
-                response = self.gemini_model.generate_content(prompt)
-                return response.text.strip()
-            except Exception as e:
-                logger.warning(f"Gemini generation failed: {e}")
+        logger.info(f"🤖 Generating missing chapter: {topic} (mode=smart, context={len(context)} chars)")
 
-        # 2. Try OpenRouter
-        if OPENROUTER_API_KEY and not OPENROUTER_API_KEY.startswith("sk-or-v1-"):
-             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "http://localhost:8000",
-                "X-Title": "BioManual Generator"
-            }
-             
-             for model in AI_MODELS:
-                try:
-                    data = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}]
-                    }
-                    response = requests.post(OPENROUTER_API_URL, headers=headers, json=data, timeout=60)
-                    if response.status_code == 200:
-                        result = response.json()
-                        if 'choices' in result:
-                            return result['choices'][0]['message']['content'].strip()
-                except: continue
+        # OpenRouter only
+        if openrouter.is_available:
+            result = openrouter.call(prompt, timeout=60)
+            if result:
+                return result
 
-        return f"[GENERATION FAILED] Could not generate {topic}. Please check internet connection or API Quota."
+        return f"[GENERATION FAILED] Tidak bisa generate {topic}. Periksa OPENROUTER_API_KEY di .env."
     
     def scan_document(self, image_path, filename_base, session_id=None):
         logger.info(f"🔍 Scanning (Hybrid Mode): {os.path.basename(image_path)}")
@@ -352,13 +283,25 @@ YOUR TASK:
                     if x2 <= x1 or y2 <= y1: continue
                     
                     # Create crop for this region
+                    # DEFAULT: Use clean image for OCR (Text)
                     crop_img = clean_img[y1:y2, x1:x2]
                     
                     # BRANCH A: Visual Elements (Table/Figure)
                     if rtype in ['table', 'figure']:
+                        # Add SAFETY PADDING (20px) to capture borders/headers
+                        pad = 20
+                        px1 = max(0, x1 - pad)
+                        py1 = max(0, y1 - pad)
+                        px2 = min(w, x2 + pad)
+                        py2 = min(h, y2 + pad)
+                        
+                        # Use ORIGINAL IMAGE for visuals (preserve color)
+                        # We use the original_img (before thresholding)
+                        crop_visual = original_img[py1:py2, px1:px2]
+                        
                         crop_fname = f"{filename_base}_crop_{rtype}_{idx}.png"
                         crop_path = os.path.join(output_dir, crop_fname)
-                        cv2.imwrite(crop_path, crop_img)
+                        cv2.imwrite(crop_path, crop_visual)
                         
                         visual_regions.append({
                             "type": rtype,
