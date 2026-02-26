@@ -1,16 +1,18 @@
 """
-HYBRID VISION PIPELINE v5 — Optimized for Accuracy & Speed
+HYBRID VISION PIPELINE v6 — Tesseract + PPStructure + AI
 ============================================================
 
 Strategy (3-stage pipeline):
-  Stage 1: PPStructure  → Layout detection (text / table / figure regions)
-  Stage 2: PaddleOCR    → Text extraction per region (accurate OCR, no AI typos)
-  Stage 3: AI (Gemini)  → Chapter classification (TEXT-ONLY, no image = cheap & fast)
+  Stage 1: PPStructure    → Layout detection (text / table / figure regions)
+  Stage 2: Tesseract OCR  → Text extraction per region (PRIMARY, with lang packs)
+           PaddleOCR      → Fallback if Tesseract unavailable
+  Stage 3: AI (Gemini)    → Chapter classification (TEXT-ONLY, no image = cheap & fast)
 
-Why this works better:
-  - PaddleOCR:    specialized OCR = NO typos (unlike AI OCR)
-  - PPStructure:  trained to detect tables/figures visually = tables stay as images
-  - AI:           only classifies text into chapters = fast, cheap (no image sent)
+Why Tesseract:
+  - Has dedicated Indonesian language pack (`ind`) = far fewer typos
+  - Has dedicated English language pack (`eng`) = proven accuracy
+  - Industry standard OCR used by Google, Adobe, Microsoft
+  - Fast and reliable for printed text
 
 Updated: February 2026
 """
@@ -21,9 +23,45 @@ import numpy as np
 import logging
 import json
 import re
+import base64
 
 from paddleocr import PaddleOCR, PPStructure
 from dotenv import load_dotenv
+
+# Tesseract OCR (PRIMARY)
+try:
+    import pytesseract
+    from PIL import Image
+
+    # Auto-detect Tesseract path on Windows
+    tesseract_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.join("C:\\Users", os.getenv('USERNAME', ''), "AppData", "Local", "Tesseract-OCR", "tesseract.exe"),
+    ]
+    TESSERACT_AVAILABLE = False
+    for tpath in tesseract_paths:
+        if os.path.exists(tpath):
+            pytesseract.pytesseract.tesseract_cmd = tpath
+            TESSERACT_AVAILABLE = True
+            break
+
+    # Check if tesseract is in PATH
+    if not TESSERACT_AVAILABLE:
+        import shutil
+        if shutil.which('tesseract'):
+            TESSERACT_AVAILABLE = True
+
+    if TESSERACT_AVAILABLE:
+        # Verify it works
+        ver = pytesseract.get_tesseract_version()
+        logging.info(f"✓ Tesseract OCR v{ver} found")
+    else:
+        logging.warning("⚠️ Tesseract OCR not found — will use PaddleOCR fallback")
+
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    logging.warning("⚠️ pytesseract not installed — will use PaddleOCR fallback")
 
 # Import OpenRouter Smart Client
 from openrouter_client import get_openrouter_client
@@ -61,15 +99,22 @@ class BioVisionHybrid:
             recovery=False
         )
 
-        # ── Stage 2: OCR Engine ──
-        logger.info("Initializing PaddleOCR (text extraction)...")
+        # ── Stage 2: OCR Engines ──
+        # PRIMARY: Tesseract (has dedicated Indonesian + English language packs)
+        if TESSERACT_AVAILABLE:
+            logger.info("✓ Tesseract OCR: PRIMARY engine (ind + eng)")
+        else:
+            logger.info("⚠️ Tesseract unavailable — PaddleOCR will be used")
+
+        # FALLBACK: PaddleOCR (used when Tesseract is unavailable)
+        logger.info("Initializing PaddleOCR (fallback OCR engine)...")
         self.ocr_engine = PaddleOCR(
             use_angle_cls=True,
-            lang='en',       # Latin-script model, works for both EN and ID
+            lang='en',
             show_log=False
         )
 
-        logger.info("✓ Hybrid Vision Pipeline v5 Ready")
+        logger.info("✓ Hybrid Vision Pipeline v6 Ready")
 
     # ═══════════════════════════════════════════════════════════════
     # STAGE 1: Layout Detection (PPStructure)
@@ -136,13 +181,64 @@ class BioVisionHybrid:
             return []
 
     # ═══════════════════════════════════════════════════════════════
-    # STAGE 2: Text Extraction (PaddleOCR)
+    # PREPROCESSING: Watermark Removal + Denoising (for OCR)
     # ═══════════════════════════════════════════════════════════════
-    def _extract_text(self, image_cv, bbox):
+    def _preprocess_for_ocr(self, crop):
         """
-        Extract text from a specific region using PaddleOCR.
-        This is the KEY improvement: PaddleOCR does OCR, not AI!
-        → No hallucinations, no typos from AI misreading.
+        Clean an image crop before OCR:
+        1. Remove red/pink watermarks (common in medical device manuals)
+        2. Denoise with bilateral filter (preserves edges/text)
+        3. Enhance contrast for sharper text
+        """
+        if crop is None or crop.size == 0:
+            return crop
+
+        try:
+            # 1. Remove red/pink watermarks using HSV color masking
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+
+            # Red range 1: 0–10
+            mask1 = cv2.inRange(hsv, np.array([0, 30, 30]), np.array([10, 255, 255]))
+            # Red range 2: 160–180
+            mask2 = cv2.inRange(hsv, np.array([160, 30, 30]), np.array([180, 255, 255]))
+            # Orange range: 10–25
+            mask3 = cv2.inRange(hsv, np.array([10, 50, 50]), np.array([25, 255, 255]))
+
+            watermark_mask = mask1 + mask2 + mask3
+
+            # Dilate to cover anti-aliased edges
+            kernel = np.ones((3, 3), np.uint8)
+            watermark_mask = cv2.dilate(watermark_mask, kernel, iterations=2)
+
+            # Replace watermark pixels with white
+            clean = crop.copy()
+            clean[watermark_mask > 0] = (255, 255, 255)
+
+            # 2. Denoise (preserves text edges)
+            clean = cv2.bilateralFilter(clean, 9, 75, 75)
+
+            # 3. Sharpen for better character recognition
+            sharpen_kernel = np.array([[-1, -1, -1],
+                                       [-1,  9, -1],
+                                       [-1, -1, -1]])
+            clean = cv2.filter2D(clean, -1, sharpen_kernel)
+
+            return clean
+        except Exception as e:
+            logger.warning(f"Preprocessing failed, using original: {e}")
+            return crop
+
+    # ═══════════════════════════════════════════════════════════════
+    # STAGE 2: Text Extraction
+    #   Indonesian → Tesseract OCR (lang pack 'ind')
+    #   English    → PaddleOCR (lang 'en')
+    # ═══════════════════════════════════════════════════════════════
+    def _extract_text(self, image_cv, bbox, lang='en'):
+        """
+        Extract text from a specific region.
+        OCR engine is selected based on language:
+          - 'id' → Tesseract with Indonesian language pack
+          - 'en' → PaddleOCR with English model
         """
         x1, y1, x2, y2 = bbox
         crop = image_cv[y1:y2, x1:x2]
@@ -150,39 +246,68 @@ class BioVisionHybrid:
         if crop.size == 0:
             return "", 0.0
 
-        try:
-            ocr_result = self.ocr_engine.ocr(crop, cls=False)
-            if ocr_result and ocr_result[0]:
-                lines = []
+        # Preprocess: clean watermark + denoise
+        clean_crop = self._preprocess_for_ocr(crop)
+
+        # ── INDONESIAN → Tesseract OCR ──
+        if lang == 'id' and TESSERACT_AVAILABLE:
+            try:
+                rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb)
+
+                config = '--oem 3 --psm 6'
+                data = pytesseract.image_to_data(
+                    pil_img, lang='ind', config=config,
+                    output_type=pytesseract.Output.DICT
+                )
+
+                words = []
                 confidences = []
-                for line in ocr_result[0]:
-                    text = line[1][0]
-                    conf = line[1][1]
-                    if conf > 0.4:           # Skip very low confidence noise
-                        lines.append(text)
-                        confidences.append(conf)
+                for i, txt in enumerate(data['text']):
+                    txt = txt.strip()
+                    conf = int(data['conf'][i])
+                    if txt and conf > 30:
+                        words.append(txt)
+                        confidences.append(conf / 100.0)
 
-                if lines:
+                if words:
                     avg_conf = sum(confidences) / len(confidences)
-                    return " ".join(lines), avg_conf
+                    return ' '.join(words), avg_conf
 
-        except Exception as e:
-            logger.warning(f"OCR failed for region {bbox}: {e}")
+            except Exception as e:
+                logger.warning(f"Tesseract (ind) failed: {e}")
+                return "", 0.0
+
+        # ── ENGLISH → PaddleOCR ──
+        else:
+            try:
+                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
+                if ocr_result and ocr_result[0]:
+                    lines = []
+                    confidences = []
+                    for line in ocr_result[0]:
+                        text = line[1][0]
+                        conf = line[1][1]
+                        if conf > 0.4:
+                            lines.append(text)
+                            confidences.append(conf)
+
+                    if lines:
+                        avg_conf = sum(confidences) / len(confidences)
+                        return " ".join(lines), avg_conf
+
+            except Exception as e:
+                logger.warning(f"PaddleOCR (en) failed: {e}")
 
         return "", 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # STAGE 3: AI Chapter Classification (TEXT-ONLY — no image!)
     # ═══════════════════════════════════════════════════════════════
-    def _classify_chapters_ai(self, elements):
+    def _classify_chapters_ai(self, elements, lang='id'):
         """
         Classify text elements into standardized chapters using AI.
-
-        KEY INSIGHT: We send TEXT ONLY (no image!) to the AI.
-        Benefits:
-          - 10-50x cheaper (no base64 image encoding)
-          - 5x faster (much smaller payload)
-          - More accurate (AI focuses on semantics, not OCR)
+        Uses language-appropriate chapter names.
         """
         if not AI_AVAILABLE:
             return None
@@ -200,24 +325,28 @@ class BioVisionHybrid:
 
         elements_text = "\n".join(items)
 
-        prompt = f"""Classify each text element from a medical device manual into a chapter.
+        # ── Language-adaptive prompt ──
+        ch_prefix = "Chapter" if lang == 'en' else "BAB"
+        lang_note = "This is an ENGLISH document." if lang == 'en' else "This is an INDONESIAN document."
 
-CHAPTERS:
-1=Safety, Purpose, Introduction, Warnings
-2=Installation, Setup, Assembly, Mounting
-3=Operation, Usage, Controls, Display, Monitoring
-4=Maintenance, Cleaning, Care, Battery
-5=Troubleshooting, Errors, Problems, FAQ
-6=Technical Specifications, Standards, Dimensions
-7=Warranty, Service, Contact Info
+        prompt = f"""Classify each text element from a medical device manual into a chapter.
+{lang_note}
+
+CHAPTERS (use "{ch_prefix} N" format):
+{ch_prefix} 1 = Safety, Purpose, Introduction, Warnings
+{ch_prefix} 2 = Installation, Setup, Assembly, Mounting
+{ch_prefix} 3 = Operation, Usage, Controls, Display, Monitoring
+{ch_prefix} 4 = Maintenance, Cleaning, Care, Battery
+{ch_prefix} 5 = Troubleshooting, Errors, Problems, FAQ
+{ch_prefix} 6 = Technical Specifications, Standards, Dimensions
+{ch_prefix} 7 = Warranty, Service, Contact Info
 
 ELEMENTS (format: index|type|text):
 {elements_text}
 
 Return ONLY a JSON array. For each element:
-{{"i": index, "c": chapter_number(1-7), "l": "en" or "id"}}
+{{"i": index, "c": chapter_number(1-7), "l": "{lang}"}}
 
-Detect language from the actual text content.
 Output ONLY the JSON array, nothing else."""
 
         vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
@@ -251,7 +380,7 @@ Output ONLY the JSON array, nothing else."""
     # ═══════════════════════════════════════════════════════════════
     # MAIN ENTRY POINT: scan_document
     # ═══════════════════════════════════════════════════════════════
-    def scan_document(self, image_path, filename_base, session_id=None):
+    def scan_document(self, image_path, filename_base, session_id=None, lang='id'):
         """
         Main entry point for the hybrid pipeline.
 
@@ -311,7 +440,7 @@ Output ONLY the JSON array, nothing else."""
                 })
             else:
                 # Text elements: extract with PaddleOCR
-                text, confidence = self._extract_text(original_img, bbox)
+                text, confidence = self._extract_text(original_img, bbox, lang=lang)
                 if text.strip():
                     elements.append({
                         "type": rtype,
@@ -329,8 +458,8 @@ Output ONLY the JSON array, nothing else."""
         )
 
         if ai_enabled and elements:
-            logger.info(f"🧠 Stage 3: AI chapter classification (text-only)...")
-            classifications = self._classify_chapters_ai(elements)
+            logger.info(f"🧠 Stage 3: AI chapter classification (text-only, lang={lang})...")
+            classifications = self._classify_chapters_ai(elements, lang=lang)
 
             if classifications:
                 # Build lookup map
@@ -344,7 +473,8 @@ Output ONLY the JSON array, nothing else."""
                 for idx, elem in enumerate(elements):
                     if idx in cls_map:
                         ch_num = cls_map[idx].get('c', 1)
-                        lang = cls_map[idx].get('l', 'id')
+                        # IMPORTANT: use the function's lang parameter, NOT AI's response
+                        # (AI might return wrong lang; user already selected it)
 
                         # Validate chapter number
                         if not isinstance(ch_num, int) or ch_num < 1 or ch_num > 7:
@@ -352,7 +482,7 @@ Output ONLY the JSON array, nothing else."""
 
                         ch_prefix = "Chapter" if lang == 'en' else "BAB"
                         elem['chapter'] = f"{ch_prefix} {ch_num}"
-                        elem['lang'] = lang
+                        elem['lang'] = lang  # Always use user-selected language
                         classified_count += 1
 
                 logger.info(f"✓ Classified {classified_count}/{len(elements)} elements")

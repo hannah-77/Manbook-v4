@@ -1,0 +1,13 @@
+﻿Analyzing lib...                                                
+
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:300:34 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:350:39 - deprecated_member_use
+   info - Don't invoke 'print' in production code - lib\main.dart:779:5 - avoid_print
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:787:44 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:969:43 - deprecated_member_use
+   info - Unnecessary use of 'toList' in a spread - lib\main.dart:1171:10 - unnecessary_to_list_in_spreads
+   info - Unnecessary braces in a string interpolation - lib\main.dart:1492:77 - unnecessary_brace_in_string_interps
+   info - Unnecessary use of 'toList' in a spread - lib\report_editor_page.dart:221:16 - unnecessary_to_list_in_spreads
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\report_editor_page.dart:239:33 - deprecated_member_use
+   info - Unnecessary use of 'toList' in a spread - lib\report_editor_page.dart:376:12 - unnecessary_to_list_in_spreads
+

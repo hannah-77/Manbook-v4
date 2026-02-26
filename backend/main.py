@@ -332,9 +332,12 @@ class BioBrain:
             logger.warning(f"Spell checker init failed: {e}. Typo detection disabled.")
             self.spell = None
 
-    def normalize_text(self, text):
+    def normalize_text(self, text, lang='id'):
         """
-        Koreksi Typo & Normalisasi dengan Spell Checker
+        Koreksi Typo & Normalisasi
+        - Regex cleanup (OCR artifacts): ALWAYS runs (language-agnostic)
+        - Spell checking: ONLY for English. Indonesian text is left as-is
+          because the English spell checker actively corrupts Indonesian words.
         """
         if not text or len(text.strip()) == 0:
             return {
@@ -418,15 +421,19 @@ class BioBrain:
         
         # --- END SMART REGEX CLEANER ---
         
-        # If spell checker not available, return as-is
-        if not self.spell:
+        # For Indonesian: SKIP spell checker entirely!
+        # The English spell checker would "correct" valid Indonesian words
+        # like 'penggunaan' → some random English word. This is HARMFUL.
+        if lang == 'id' or not self.spell:
             return {
-                "original": text,
+                "original": text.strip(),
                 "corrected": text.strip(),
                 "typos": [],
                 "has_typo": False,
                 "confidence": 1.0
             }
+        
+        # For English: spell checker runs normally
         
         # Split into words (preserve punctuation context)
         import re
@@ -1046,20 +1053,14 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     # Main Builder
     # ─────────────────────────────────────────────
-    def build_report(self, classified_data, original_filename):
+    def build_report(self, classified_data, original_filename, lang='id'):
         doc = Document()
 
         self._set_fixed_margins(doc)
         self._set_fixed_styles(doc)
 
-        # Detect language from data
-        doc_lang = 'id'
-        for item in classified_data:
-            if item.get('lang') == 'en' or str(item.get('chapter_id', '')).startswith('Chapter'):
-                doc_lang = 'en'
-                break
-        
-        # Add header/footer with correct language label
+        # Use the explicit language from user selection
+        doc_lang = lang
         bab_label_base = "Chapter" if doc_lang == 'en' else "BAB"
         self._add_header_footer(doc, bab_label=bab_label_base)
 
@@ -1292,12 +1293,14 @@ async def get_progress(session_id: str):
 async def process_workflow(request: Request, file: UploadFile = File(...)):
     import uuid
 
-    # Gunakan session_id dari header jika frontend sudah pre-register via /start
+    # Gunakan session_id dan language dari header
     session_id = request.headers.get("X-Session-Id") or str(uuid.uuid4())
+    doc_language = request.headers.get("X-Language", "id")  # 'id' or 'en'
 
     # Initialize Brain per request (fresh context)
     brain_module = BioBrain()
-
+    # Set initial context based on language
+    brain_module.current_context = "Chapter 1" if doc_language == 'en' else "BAB 1"
     logger.info(f"Starting BioManual Workflow for: {file.filename} (Session: {session_id})")
 
     temp_path = os.path.join(BASE_PATH, f"temp_{file.filename}")
@@ -1393,8 +1396,8 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                     page_path = os.path.join(BASE_PATH, f"page_{i}.png")
                     img_src.save(page_path, "PNG")
 
-                # A. THE EYE (Scan)
-                scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}")
+                # A. THE EYE (Scan) — pass language for OCR engine selection
+                scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}", lang=doc_language)
 
                 # Handle return format (Backward compatibility check)
                 if isinstance(scan_result, list):
@@ -1434,7 +1437,8 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 }
 
                 for element in layout_elements:
-                    normalized_result = brain_module.normalize_text(element['text'])
+                    # Pass language so spell checker is skipped for Indonesian
+                    normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
                     element['text'] = normalized_result['corrected']
 
                     # Detect element language (from AI or auto-detect from text)
@@ -1455,10 +1459,16 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                     else:
                         bab_id, bab_title = brain_module.semantic_mapping(element)
 
-                    # Remap BAB→Chapter if content is English
-                    if elem_lang == 'en' and bab_id.startswith('BAB '):
+                    # Remap BAB→Chapter or Chapter→BAB based on selected language
+                    if doc_language == 'en' and bab_id.startswith('BAB '):
                         bab_num = bab_id.replace('BAB ', '')
                         new_key = f"Chapter {bab_num}"
+                        if new_key in chapter_titles:
+                            bab_id = new_key
+                            bab_title = chapter_titles[new_key]
+                    elif doc_language == 'id' and bab_id.startswith('Chapter '):
+                        bab_num = bab_id.replace('Chapter ', '')
+                        new_key = f"BAB {bab_num}"
                         if new_key in chapter_titles:
                             bab_id = new_key
                             bab_title = chapter_titles[new_key]
@@ -1471,7 +1481,7 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                         "normalized": normalized_result['corrected'],
                         "typos": normalized_result['typos'],
                         "has_typo": normalized_result['has_typo'],
-                        "text_confidence": normalized_result['confidence'],
+                        "text_confidence": element.get('confidence', 1.0),
                         "match_score": 100,
                         "lang": elem_lang,
                         "crop_url": element.get('crop_url'),
@@ -1493,10 +1503,8 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
 
         # 2.5 CHECK MISSING CHAPTERS (Report only — no auto-generation)
         existing_chapters = set(item['chapter_id'] for item in structured_data)
-        
-        # Detect document language from existing chapters
-        doc_lang = 'en' if any(ch.startswith('Chapter') for ch in existing_chapters) else 'id'
-        all_chapters = [f"Chapter {i}" for i in range(1, 8)] if doc_lang == 'en' else [f"BAB {i}" for i in range(1, 8)]
+        # Use the language selected by user (from header)
+        all_chapters = [f"Chapter {i}" for i in range(1, 8)] if doc_language == 'en' else [f"BAB {i}" for i in range(1, 8)]
         
         missing = set(all_chapters) - existing_chapters
         if missing:
@@ -1514,7 +1522,7 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
         })
         print(f"\n  🏗️  Step 3 : Menyusun laporan Word ({len(structured_data)} elemen)...")
         
-        result = architect_module.build_report(structured_data, file.filename)
+        result = architect_module.build_report(structured_data, file.filename, lang=doc_language)
         
         word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
         pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result['pdf_file'] else None
