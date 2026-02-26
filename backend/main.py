@@ -1286,12 +1286,7 @@ async def get_progress(session_id: str):
         return progress_tracker[session_id]
     return {"error": "Session not found"}
 
-@app.get("/files/{filename}")
-async def serve_file(filename: str):
-    path = os.path.join(BASE_PATH, filename)
-    if os.path.exists(path):
-        return FileResponse(path)
-    return {"error": "File not found"}
+# NOTE: /files/{filename} endpoint already defined at top of file (line 54)
 
 @app.post("/process")
 async def process_workflow(request: Request, file: UploadFile = File(...)):
@@ -1712,7 +1707,6 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
     except Exception as e:
         logger.error(f"Supplement Workflow Failed: {e}")
         return {"success": False, "error": str(e)}
-        pass
 
 # Helper
 def convert_pdf_to_images_safe(path):
@@ -1723,10 +1717,11 @@ def convert_pdf_to_images_safe(path):
              if os.path.exists(p):
                  poppler = p
                  break
+    dpi = int(os.getenv('PDF_DPI', '300'))  # 300 DPI for best OCR accuracy
     try:
-        return convert_from_path(path, dpi=200, poppler_path=poppler)
-    except:
-        return convert_from_path(path, dpi=200)
+        return convert_from_path(path, dpi=dpi, poppler_path=poppler)
+    except Exception:
+        return convert_from_path(path, dpi=dpi)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
