@@ -1,0 +1,50 @@
+MOL-02
+BUKU MANUAL
+DAFTAR ISI
+BAB 1   Tujuan Penggunaan & Keamanan	3
+BAB 2   Instalasi	5
+BAB 3   Panduan Operasional & Pemantauan Klinis	6
+BAB 4   Perawatan, Pemeliharaan & Pembersihan	7
+BAB 5   Pemecahan Masalah	9
+BAB 6   Spesifikasi Teknis & Kepatuhan Standar	10
+BAB 7   Garansi & Layanan	11
+BAB 1: Tujuan Penggunaan & Keamanan
+[ TABLE ]
+[ TABLE ]
+BAB 2: Instalasi
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 3: Panduan Operasional & Pemantauan Klinis
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 4: Perawatan, Pemeliharaan & Pembersihan
+BAB 4: PERAWATAN, PEMELIHARAAN & PEMBERSIHAN
+---
+4.1 Pendahuluan
+Perawatan, pemeliharaan, dan pembersihan yang tepat merupakan faktor krusial untuk memastikan kinerja optimal, keamanan pasien, dan longevity (umur pakai) perangkat medis. Bab ini memberikan panduan komprehensif mengenai prosedur perawatan rutin, pemeliharaan preventif, serta teknik pembersihan dan disinfektan yang harus dilakukan secara berkala oleh petugas yang terlatih.
+Penting: Seluruh prosedur dalam bab ini harus dilakukan oleh персонал yang telah menerima pelatihan memadai dan memahami risiko yang terkait dengan penanganan perangkat medis.
+---
+4.2 Peringatan Keamanan Umum
+Sebelum melakukan perawatan, pemeliharaan, atau pembersihan, perhatikan peringatan berikut:
+4.2.1 Peringatan Listrik
+- ▢ Pastikan perangkat dalam kondisi MATI dan terputus dari sumber listrik sebelum memulai prosedur pembersihan atau pemeliharaan internal
+- ▢ Jangan pernah membersihkan perangkat saat sedang terhubung ke stopkontak
+- ▢ Hindari masuknya cairan ke dalam komponen listrik
+- ▢ Gunakan hanya kabel daya dan adaptor yang disertakan oleh produsen
+4.2.2 Peringatan Kontaminasi
+- ▢ Kenakan APD (Alat Pelindung Diri) yang sesuai, termasuk sarung tangan medis, masker, dan gaun pelindung
+- ▢ Buang bahan habis pakai yang terkontaminasi sesuai dengan protokol fasilitas untuk limbah medis infeksius
+- ▢ Lakukan prosedur pencucian tangan sebelum dan setelah menangani perangkat
+4.2.3 Peringatan Kerusakan
+- ▢ Jangan gunakan pembersih abrasif, pelarut kuat, atau bahan kimia yang tidak disetujui
+- ▢ Hindari menjatuhkan atau memberikan dampak keras pada perangkat
+- ▢ Periksa kondisi fisik perangkat secara visual sebelum setiap penggunaan
+---
+4.3 Perawatan Rutin Harian
+Perawatan rutin harian harus dilakukan sebelum dan sesudah setiap penggunaan perangkat untuk memastikan hygiene dan fungsi yang optimal.
+4.3.1 Pemeriksaan Visual Sebelum Penggunaan
+Lakukan pemeriksaan visual berikut setiap kali sebelum mengoperasikan perangkat:
+1. Periksa kondisi fisik perangkat:
+- Tidak ada kerusakan fisik seperti retak, pecah, atau komponen yang longgar
+- Kabel daya tidak menunjukkan tanda-tanda kerusakan, sobekan, atau exposure
+- Steker dan konektor dalam kondisi bersih dan tidak berkarat
+2. Periksa indikator dan display:
+- Semua lampu indikator berfungsi normal

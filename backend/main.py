@@ -6,7 +6,7 @@ import shutil
 import logging
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from paddleocr import PPStructure
@@ -19,13 +19,13 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Import Gemini Vision (optional - falls back to PaddleOCR if not available)
+# Import Vision Engine (OpenRouter AI + PaddleOCR fallback)
 try:
-    from gemini_vision import create_vision_engine
-    GEMINI_AVAILABLE = True
+    from vision_engine import create_vision_engine
+    VISION_ENGINE_AVAILABLE = True
 except Exception as e:
-    GEMINI_AVAILABLE = False
-    logging.warning(f"Gemini Vision not available: {e}")
+    VISION_ENGINE_AVAILABLE = False
+    logging.warning(f"Vision Engine not available: {e}")
 
 # ==========================================
 # CONFIGURATION
@@ -49,6 +49,14 @@ VISION_MODE = os.getenv('VISION_MODE', 'hybrid')  # Default to hybrid for best r
 
 app = FastAPI(title="BioManual Auto-Standardizer")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+
+# Serve static files from backend directory (e.g., letterhead.png)
+@app.get("/files/{filename}")
+async def serve_backend_file(filename: str):
+    file_path = os.path.join(BASE_PATH, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    return {"error": "File not found"}
 
 # ==========================================
 # MODULE 1: THE EYE 👁️ (Vision & Pre-processing)
@@ -268,13 +276,22 @@ class BioBrain:
     def __init__(self):
         # The 7 Standard Chapters (Fixed Schema)
         self.taxonomy = {
-            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "introduction"]},
+            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "introduction", "overview"]},
             "BAB 2": {"title": "Instalasi", "keywords": ["install", "setup", "pasang", "mounting", "connect", "power", "unboxing"]},
             "BAB 3": {"title": "Panduan Operasional & Pemantauan Klinis", "keywords": ["operation", "operasional", "monitor", "display", "screen", "tombol", "measure", "klinis"]},
             "BAB 4": {"title": "Perawatan, Pemeliharaan & Pembersihan", "keywords": ["maintenance", "clean", "bersih", "replace", "ganti", "battery", "care"]},
             "BAB 5": {"title": "Pemecahan Masalah", "keywords": ["trouble", "masalah", "error", "fail", "rusak", "solution", "solusi"]},
             "BAB 6": {"title": "Spesifikasi Teknis & Kepatuhan Standar", "keywords": ["spec", "tech", "data", "dimension", "weight", "standar", "iso", "iec"]},
-            "BAB 7": {"title": "Garansi & Layanan", "keywords": ["warrant", "garansi", "service", "layanan", "contact", "support"]}
+            "BAB 7": {"title": "Garansi & Layanan", "keywords": ["warrant", "garansi", "service", "layanan", "contact", "support"]},
+            
+            # English Variants
+            "Chapter 1": {"title": "Intended Use & Safety", "keywords": ["purpose", "safety", "intended", "warning", "caution", "danger", "introduction", "overview"]},
+            "Chapter 2": {"title": "Installation", "keywords": ["install", "setup", "mounting", "connect", "power", "unboxing"]},
+            "Chapter 3": {"title": "Operation & Clinical Monitoring", "keywords": ["operation", "monitor", "display", "screen", "buttons", "measure", "clinical"]},
+            "Chapter 4": {"title": "Maintenance, Care & Cleaning", "keywords": ["maintenance", "cleaning", "care", "replace", "battery", "sterilize"]},
+            "Chapter 5": {"title": "Troubleshooting", "keywords": ["trouble", "error", "fail", "problem", "solution", "faq"]},
+            "Chapter 6": {"title": "Technical Specifications & Standards", "keywords": ["spec", "technical", "data", "dimension", "weight", "standards", "iso", "iec"]},
+            "Chapter 7": {"title": "Warranty & Service", "keywords": ["warranty", "guarantee", "service", "contact", "support"]}
         }
         self.current_context = "BAB 1"
         
@@ -583,7 +600,7 @@ class BioArchitect:
         h1.paragraph_format.keep_with_next  = True
         h1.paragraph_format.first_line_indent = Pt(0)
 
-        # ── Heading 2 (Sub-judul) ───────────────────────────
+        # ── Heading 2 (Sub-judul / 1.1) ─────────────────────────────
         h2 = doc.styles['Heading 2']
         h2.font.name = 'Arial'
         h2.font.size = Pt(12)
@@ -592,6 +609,30 @@ class BioArchitect:
         h2.paragraph_format.space_before    = Pt(10)
         h2.paragraph_format.space_after     = Pt(4)
         h2.paragraph_format.first_line_indent = Pt(0)
+
+        # ── Heading 3 (Sub-sub-judul / 1.1.1) ───────────────────────
+        h3 = doc.styles['Heading 3']
+        h3.font.name = 'Arial'
+        h3.font.size = Pt(11)
+        h3.font.bold = True
+        h3.font.italic = True
+        h3.font.color.rgb = self.COLOR_SECONDARY
+        h3.paragraph_format.space_before    = Pt(6)
+        h3.paragraph_format.space_after     = Pt(2)
+        h3.paragraph_format.left_indent     = Inches(0.25)  # indentasi H3
+        h3.paragraph_format.first_line_indent = Pt(0)
+
+        # ── Heading 4 (Level 4+, misal 1.1.1.1) ─────────────────────
+        h4 = doc.styles['Heading 4']
+        h4.font.name = 'Arial'
+        h4.font.size = Pt(11)
+        h4.font.bold = False
+        h4.font.italic = True
+        h4.font.color.rgb = self.COLOR_GRAY
+        h4.paragraph_format.space_before    = Pt(4)
+        h4.paragraph_format.space_after     = Pt(2)
+        h4.paragraph_format.left_indent     = Inches(0.5)   # indentasi H4
+        h4.paragraph_format.first_line_indent = Pt(0)
 
     # ─────────────────────────────────────────────
     # Header & Footer
@@ -719,16 +760,30 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     # Cover Page
     # ─────────────────────────────────────────────
-    def _build_cover_page(self, doc, original_filename, product_name="", product_code=""):
+    def _build_cover_page(self, doc, original_filename, product_name="", product_code="", lang='id'):
         """
         Cover page layout (sesuai referensi):
           - Kiri atas  : Nama produk bold + kode model
-          - Tengah     : "BUKU MANUAL" bold besar
+          - Tengah     : "BUKU MANUAL" atau "MANUAL BOOK" bold besar
           - Bawah      : Letterhead full-width (wave + logo)
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
         from docx.shared import Cm
+        import re
+
+        # Extract product_name from original_filename if missing or too messy
+        if not product_name:
+            stem = Path(original_filename).stem
+            # Try to grab product code like "MOL-02" near "manual" or "buku manual"
+            m = re.search(r'(?i)(?:buku manual|manual book|user manual)\s+([A-Z0-9\-]+)', stem)
+            if m and m.group(1):
+                product_name = m.group(1)
+            else:
+                # Basic string cleanup
+                product_name = stem.split('.')[0]
+                if len(product_name) > 20:
+                    product_name = product_name[:20].strip()
 
         # ── Kiri atas: Nama Produk ───────────────────────────
         p_name = doc.add_paragraph()
@@ -736,7 +791,7 @@ class BioArchitect:
         p_name.paragraph_format.space_before = Pt(40)
         p_name.paragraph_format.space_after  = Pt(0)
         p_name.paragraph_format.first_line_indent = Pt(0)
-        rn = p_name.add_run(product_name or Path(original_filename).stem.upper())
+        rn = p_name.add_run(product_name.upper())
         rn.font.name  = 'Arial'
         rn.font.size  = Pt(18)
         rn.font.bold  = True
@@ -768,7 +823,7 @@ class BioArchitect:
         p_bm.paragraph_format.space_before = Pt(0)
         p_bm.paragraph_format.space_after  = Pt(0)
         p_bm.paragraph_format.first_line_indent = Pt(0)
-        rbm = p_bm.add_run("BUKU MANUAL")
+        rbm = p_bm.add_run("MANUAL BOOK" if lang == 'en' else "BUKU MANUAL")
         rbm.font.name  = 'Arial'
         rbm.font.size  = Pt(28)
         rbm.font.bold  = True
@@ -833,7 +888,7 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     # Daftar Isi (Table of Contents)
     # ─────────────────────────────────────────────
-    def _build_toc_page(self, doc, grouped):
+    def _build_toc_page(self, doc, grouped, lang='id'):
         """
         Halaman Daftar Isi.
         - Insert field TOC standar Word (auto-update saat buka file)
@@ -848,7 +903,7 @@ class BioArchitect:
         p_title.paragraph_format.space_before = Pt(0)
         p_title.paragraph_format.space_after  = Pt(20)
         p_title.paragraph_format.first_line_indent = Pt(0)
-        rt = p_title.add_run("DAFTAR ISI")
+        rt = p_title.add_run("TABLE OF CONTENTS" if lang == 'en' else "DAFTAR ISI")
         rt.font.name  = 'Arial'
         rt.font.size  = Pt(16)
         rt.font.bold  = True
@@ -899,6 +954,10 @@ class BioArchitect:
         page_est  = 3   # estimasi mulai halaman 3 (setelah cover + toc)
 
         for bab_id, items in grouped.items():
+            # Skip English chapters if Indonesian, skip Indonesian if English
+            if lang == 'en' and bab_id.startswith('BAB '): continue
+            if lang == 'id' and bab_id.startswith('Chapter '): continue
+
             bab_title = bab_meta[bab_id]['title']
             has_content = len(items) > 0
 
@@ -938,6 +997,53 @@ class BioArchitect:
         doc.add_page_break()
 
     # ─────────────────────────────────────────────
+    # Heading Level Detector
+    # ─────────────────────────────────────────────
+    @staticmethod
+    def _detect_heading_level(text: str, stored_level: int = 0) -> int:
+        """
+        Deteksi level heading. Robust terhadap OCR noise.
+
+        Pola yang didukung (dengan/tanpa spasi ekstra dari OCR):
+          "1. Pendahuluan"      -> H2  (level 2)
+          "1.1 Sub Bab"        -> H3  (level 3)
+          "1 .1 Sub Bab"       -> H3  (OCR: spasi di titik)
+          "1.1.1 Detail"       -> H4  (level 4)
+          "1.1. Detail"        -> H3  (trailing dot)
+          "BAB I" / "BAB 1"    -> H2
+        """
+        import re
+
+        # Prioritaskan stored_level dari DOCX style (paling akurat)
+        if stored_level >= 2:
+            return min(stored_level, 4)
+
+        t = text.strip()
+
+        # Pola: "BAB I", "BAB 1", "BAB II", dsb. → H2
+        if re.match(r'^BAB\s+[IVXLC\d]+', t, re.IGNORECASE):
+            return 2
+
+        # Pola angka bernomor dengan titik — toleran terhadap OCR noise:
+        # Normalisasi: hilangkan spasi di sekitar titik antar angka (OCR artifact)
+        # Contoh: "1 .1 .1" → "1.1.1"
+        normalized = re.sub(r'(\d)\s*\.\s*(?=\d)', r'\1.', t)
+
+        # Match: satu atau lebih segmen angka dipisah titik
+        # Opsional trailing titik, lalu spasi + teks
+        m = re.match(r'^(\d+(?:\.\d+)*)\.?\s+\S', normalized)
+        if m:
+            number_part = m.group(1)          # e.g. "1", "1.1", "1.1.1"
+            dots = number_part.count('.')
+            # dots=0 → "1. Teks" → H2
+            # dots=1 → "1.1 Teks" → H3
+            # dots=2+ → "1.1.1 Teks" → H4
+            return min(2 + dots, 4)
+
+        # Default: H2
+        return 2
+
+    # ─────────────────────────────────────────────
     # Main Builder
     # ─────────────────────────────────────────────
     def build_report(self, classified_data, original_filename):
@@ -945,22 +1051,38 @@ class BioArchitect:
 
         self._set_fixed_margins(doc)
         self._set_fixed_styles(doc)
-        self._add_header_footer(doc)
 
-        # Ekstrak nama produk & kode model dari classified_data (BAB 1, tipe title)
+        # Detect language from data
+        doc_lang = 'id'
+        for item in classified_data:
+            if item.get('lang') == 'en' or str(item.get('chapter_id', '')).startswith('Chapter'):
+                doc_lang = 'en'
+                break
+        
+        # Add header/footer with correct language label
+        bab_label_base = "Chapter" if doc_lang == 'en' else "BAB"
+        self._add_header_footer(doc, bab_label=bab_label_base)
+
+        # Ekstrak nama produk & kode model dari classified_data (skip generic titles)
         product_name = ""
         product_code = ""
+        generic_titles = {'user manual', 'manual book', 'buku manual', 'operating manual',
+                          'instruction manual', 'table of contents', 'daftar isi', 'cover',
+                          'introduction', 'pendahuluan', 'kata pengantar', 'preface'}
+        # Accept either BAB 1 or Chapter 1 for cover data
+        cover_chapters = ('BAB 1', 'Chapter 1')
         for item in classified_data:
-            if item.get('type') in ('title', 'heading') and item.get('chapter_id') == 'BAB 1':
+            if item.get('type') in ('title', 'heading') and item.get('chapter_id') in cover_chapters:
                 text = item.get('normalized', '').strip()
-                if text and len(text) > 3:
+                # Skip generic titles
+                if text and len(text) > 3 and text.lower() not in generic_titles:
                     if not product_name:
                         product_name = text
                     elif not product_code:
                         product_code = text
                         break
 
-        self._build_cover_page(doc, original_filename, product_name, product_code)
+        self._build_cover_page(doc, original_filename, product_name, product_code, lang=doc_lang)
 
         # Kelompokkan per BAB (dilakukan lebih awal agar bisa dipakai TOC & konten)
         taxonomy_keys = list(BioBrain().taxonomy.keys())
@@ -970,15 +1092,20 @@ class BioArchitect:
             if key in grouped:
                 grouped[key].append(item)
             else:
-                grouped["BAB 1"].append(item)
+                # Fallback to first chapter based on lang
+                fallback_key = "Chapter 1" if doc_lang == 'en' else "BAB 1"
+                grouped[fallback_key].append(item)
 
         # Halaman Daftar Isi
-        self._build_toc_page(doc, grouped)
+        self._build_toc_page(doc, grouped, lang=doc_lang)
 
         # Bangun konten per BAB
         for bab_id, items in grouped.items():
-            bab_title = BioBrain().taxonomy[bab_id]["title"]
+            # Skip empty BAB 1-7 if documents use Chapter 1-7 (and vice versa)
+            if doc_lang == 'en' and bab_id.startswith('BAB '): continue
+            if doc_lang == 'id' and bab_id.startswith('Chapter '): continue
 
+            bab_title = BioBrain().taxonomy[bab_id]["title"]
             self._add_chapter_header(doc, bab_id, bab_title)
 
             if not items:
@@ -990,13 +1117,19 @@ class BioArchitect:
                 doc.add_page_break()
                 continue
 
+            current_heading_level = 2  # reset per chapter
+
             for item in items:
                 content_type = item['type']
                 text         = item['normalized']
 
                 if content_type in ('title', 'heading'):
-                    h2 = doc.add_heading(text, level=2)
-                    h2.paragraph_format.first_line_indent = Pt(0)
+                    # Tentukan level heading berdasarkan teks atau level tersimpan
+                    stored_lvl = item.get('heading_level', 0)
+                    lvl = self._detect_heading_level(text, stored_lvl)
+                    current_heading_level = lvl  # track untuk indentasi body text
+                    h = doc.add_heading(text, level=lvl)
+                    h.paragraph_format.first_line_indent = Pt(0)
 
                 elif content_type in ('figure', 'table'):
                     if item.get('crop_local') and os.path.exists(item['crop_local']):
@@ -1043,6 +1176,16 @@ class BioArchitect:
                     p = doc.add_paragraph(text)
                     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
+                    # Indentasi body text sesuai level heading induknya
+                    # H2 (level 2) → indent 0      (body normal)
+                    # H3 (level 3) → indent 0.25in (1 tingkat masuk)
+                    # H4 (level 4) → indent 0.50in (2 tingkat masuk)
+                    body_indent_map = {2: 0.0, 3: 0.25, 4: 0.5}
+                    body_indent = body_indent_map.get(current_heading_level, 0.0)
+                    if body_indent > 0:
+                        p.paragraph_format.left_indent = Inches(body_indent)
+                    p.paragraph_format.first_line_indent = Inches(0.35) if body_indent == 0 else Pt(0)
+
                     if item.get('has_typo'):
                         warn = doc.add_paragraph()
                         warn.paragraph_format.first_line_indent = Pt(0)
@@ -1050,11 +1193,29 @@ class BioArchitect:
                         wr.font.size = Pt(8)
                         wr.font.color.rgb = RGBColor(0xFF, 0xA5, 0x00)  # Orange
 
+
             doc.add_page_break()
 
-        # Simpan
-        word_filename = f"Standardized_{Path(original_filename).stem}.docx"
+        # Simpan — gunakan product_name untuk nama file jika tersedia
+        import re as _re
+        if product_name:
+            # Bersihkan dari karakter yang tidak valid untuk nama file
+            safe_name = _re.sub(r'[\\/*?:"<>|]', '', product_name).strip()
+            safe_name = safe_name[:80]  # batas 80 karakter
+        else:
+            safe_name = Path(original_filename).stem
+
+        word_filename = f"{safe_name}.docx"
         word_path     = os.path.join(BASE_PATH, word_filename)
+
+        # Set document metadata
+        try:
+            doc.core_properties.title   = safe_name
+            doc.core_properties.subject = "Manual Book"
+            doc.core_properties.author  = "BioManual AI"
+        except Exception:
+            pass
+
         doc.save(word_path)
         logger.info(f"✓ Word file saved: {word_filename}")
 
@@ -1070,12 +1231,12 @@ class BioArchitect:
 # Initialize Vision Module based on configuration
 def initialize_vision_module():
     """Initialize vision module based on VISION_MODE setting"""
-    if VISION_MODE in ['gemini', 'hybrid'] and GEMINI_AVAILABLE:
+    if VISION_MODE in ['gemini', 'hybrid'] and VISION_ENGINE_AVAILABLE:
         try:
             logger.info(f"Initializing {VISION_MODE.upper()} vision mode...")
             return create_vision_engine(mode=VISION_MODE)
         except Exception as e:
-            logger.error(f"Failed to initialize Gemini: {e}")
+            logger.error(f"Failed to initialize Vision Engine: {e}")
             logger.info("Falling back to PaddleOCR...")
             return BioVision()
     else:
@@ -1104,6 +1265,20 @@ def _print_progress(current: int, total: int, label: str = "", width: int = 40):
 def health():
     return {"status": "BioManual System Online"}
 
+@app.post("/start")
+async def start_session():
+    """Pre-register a session so frontend can poll /progress before processing starts."""
+    import uuid
+    session_id = str(uuid.uuid4())
+    progress_tracker[session_id] = {
+        "status": "waiting",
+        "current_page": 0,
+        "total_pages": 0,
+        "percentage": 0,
+        "message": "Mengunggah file..."
+    }
+    return {"session_id": session_id}
+
 @app.get("/progress/{session_id}")
 async def get_progress(session_id: str):
     """Get processing progress for a session"""
@@ -1119,24 +1294,24 @@ async def serve_file(filename: str):
     return {"error": "File not found"}
 
 @app.post("/process")
-async def process_workflow(file: UploadFile = File(...)):
+async def process_workflow(request: Request, file: UploadFile = File(...)):
     import uuid
-    
-    # Generate session ID for progress tracking
-    session_id = str(uuid.uuid4())
-    
+
+    # Gunakan session_id dari header jika frontend sudah pre-register via /start
+    session_id = request.headers.get("X-Session-Id") or str(uuid.uuid4())
+
     # Initialize Brain per request (fresh context)
     brain_module = BioBrain()
-    
+
     logger.info(f"Starting BioManual Workflow for: {file.filename} (Session: {session_id})")
-    
+
     temp_path = os.path.join(BASE_PATH, f"temp_{file.filename}")
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     structured_data = []
-    
-    # Initialize progress
+
+    # Initialize / reset progress (session bisa sudah ada dari /start)
     progress_tracker[session_id] = {
         "status": "starting",
         "current_page": 0,
@@ -1146,163 +1321,197 @@ async def process_workflow(file: UploadFile = File(...)):
     }
 
     try:
-        # STEP 1: IMAGE CONVERSION
+        # Variabel default (dipakai oleh image/pdf branch; DOCX tidak perlu)
         images = []
-        if file.filename.lower().endswith('.pdf'):
-            progress_tracker[session_id]["message"] = "Converting PDF to images..."
-            print(f"\n{'='*60}")
-            print(f"  📄 File   : {file.filename}")
-            print(f"  🔄 Step 1 : Converting PDF to images...")
-            print(f"{'='*60}")
-            images = convert_pdf_to_images_safe(temp_path)
-        else:
-            images = [temp_path]
-        
-        # Initialize list to store cleaned page URLs for frontend preview
         clean_pages_urls = []
-        
-        total_pages = len(images)
-        progress_tracker[session_id]["total_pages"] = total_pages
-        progress_tracker[session_id]["message"] = f"Processing {total_pages} page(s)..."
-        print(f"\n  📑 Total  : {total_pages} halaman")
-        print(f"  🔄 Step 2 : Scanning setiap halaman...")
+        total_pages = 0
 
-        # STEP 2: LOOP THROUGH PAGES
-        for i, img_src in enumerate(images):
-            current_page = i + 1
-            pct = int((current_page / total_pages) * 100)
-            
-            # Update progress
+        # Normalize filename extension
+        fname_lower = file.filename.lower()
+
+        # ─── BRANCH: DOCX / DOC ─────────────────────────────────────────
+        if fname_lower.endswith('.docx') or fname_lower.endswith('.doc'):
+            print(f"\n{'='*60}")
+            print(f"  📝 File   : {file.filename}")
+            print(f"  🔄 Step 1 : Converting Word document to PDF for Visual Scanning...")
+            print(f"{'='*60}")
+
             progress_tracker[session_id].update({
                 "status": "processing",
-                "current_page": current_page,
-                "percentage": pct,
-                "message": f"Processing page {current_page} of {total_pages}..."
+                "message": "Converting Word to PDF to preserve visual tables...",
+                "percentage": 10,
             })
-            
-            # ── Terminal Progress Bar ──
-            _print_progress(current_page, total_pages,
-                            f"Hal. {current_page}/{total_pages}  ({pct}%)")
-            
-            logger.info(f"Processing page {current_page}/{total_pages}")
-            
-            # Resolve image path
-            page_path = img_src
-            if not isinstance(img_src, str):
-                page_path = os.path.join(BASE_PATH, f"page_{i}.png")
-                img_src.save(page_path, "PNG")
 
-            # A. THE EYE (Scan)
-            # Returns dict: {'elements': [], 'clean_image_path': 'path/to/img.jpg'}
-            scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}")
-            
-            # Handle return format (Backward compatibility check)
-            if isinstance(scan_result, list):
-                layout_elements = scan_result
-                clean_img_url = None
+            from docx2pdf import convert
+            pdf_path = temp_path + ".pdf"
+            try:
+                import pythoncom
+                pythoncom.CoInitialize() # Required for COM in threads
+                convert(temp_path, pdf_path)
+                temp_path = pdf_path
+                fname_lower = fname_lower + ".pdf"
+            except Exception as e:
+                logger.error(f"Cannot convert Word to PDF: {e}")
+                return {"success": False, "error": f"Gagal mengonversi Word ke format visual: {e}"}
+
+        # ─── BRANCH: PDF / IMAGE ─────────────────────────────────────────
+        # STEP 1: IMAGE CONVERSION
+        if True:
+            if fname_lower.endswith('.pdf'):
+                progress_tracker[session_id]["message"] = "Converting PDF to images..."
+                print(f"\n{'='*60}")
+                print(f"  📄 File   : {file.filename}")
+                print(f"  🔄 Step 1 : Converting PDF to images...")
+                print(f"{'='*60}")
+                images = convert_pdf_to_images_safe(temp_path)
             else:
-                layout_elements = scan_result.get('elements', [])
-                clean_path = scan_result.get('clean_image_path')
-                
-                # Convert path to URL
-                if clean_path and os.path.exists(clean_path):
-                     fname = os.path.basename(clean_path)
-                     clean_img_url = f"http://127.0.0.1:8000/output/{fname}"
-                     clean_pages_urls.append(clean_img_url)
-                else:
-                     clean_img_url = None
-            
-            # B. THE BRAIN (Classify)
-            for element in layout_elements:
-                # Normalization with Typo Detection
-                normalized_result = brain_module.normalize_text(element['text'])
-                
-                # Update element with corrected text for classification
-                element['text'] = normalized_result['corrected']
-                
-                # Semantic Mapping (use corrected text)
-                bab_id, bab_title = brain_module.semantic_mapping(element)
-                
-                # Add Metadata with Typo Information
-                structured_data.append({
-                    "chapter_id": bab_id,
-                    "chapter_title": bab_title,
-                    "type": element['type'],
-                    "original": normalized_result['original'],
-                    "normalized": normalized_result['corrected'],
-                    "typos": normalized_result['typos'],
-                    "has_typo": normalized_result['has_typo'],
-                    "text_confidence": normalized_result['confidence'],
-                    "match_score": 100, # Mock score
-                    "crop_url": element['crop_url'],
-                    "crop_local": element['crop_local']
+                images = [temp_path]
+
+            total_pages = len(images)
+            progress_tracker[session_id]["total_pages"] = total_pages
+            progress_tracker[session_id]["message"] = f"Processing {total_pages} page(s)..."
+            print(f"\n  📑 Total  : {total_pages} halaman")
+            print(f"  🔄 Step 2 : Scanning setiap halaman...")
+
+            # STEP 2: LOOP THROUGH PAGES
+            for i, img_src in enumerate(images):
+                current_page = i + 1
+                pct = int((current_page / total_pages) * 100)
+
+                # Update progress
+                progress_tracker[session_id].update({
+                    "status": "processing",
+                    "current_page": current_page,
+                    "percentage": pct,
+                    "message": f"Processing page {current_page} of {total_pages}..."
                 })
 
-            # Cleanup
-            # Cleanup with retry
-            import time
-            if not isinstance(img_src, str):
-                for attempt in range(3):
-                    try:
-                        if os.path.exists(page_path):
-                            os.remove(page_path)
-                        break
-                    except PermissionError:
-                         time.sleep(0.5)
-                    except Exception:
-                         pass
+                # ── Terminal Progress Bar ──
+                _print_progress(current_page, total_pages,
+                                f"Hal. {current_page}/{total_pages}  ({pct}%)")
 
+                logger.info(f"Processing page {current_page}/{total_pages}")
 
-        # 2.5 CHECK MISSING CHAPTERS (Auto-Fill)
+                # Resolve image path
+                page_path = img_src
+                if not isinstance(img_src, str):
+                    page_path = os.path.join(BASE_PATH, f"page_{i}.png")
+                    img_src.save(page_path, "PNG")
+
+                # A. THE EYE (Scan)
+                scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}")
+
+                # Handle return format (Backward compatibility check)
+                if isinstance(scan_result, list):
+                    layout_elements = scan_result
+                    clean_img_url = None
+                else:
+                    layout_elements = scan_result.get('elements', [])
+                    clean_path = scan_result.get('clean_image_path')
+
+                    # Convert path to URL
+                    if clean_path and os.path.exists(clean_path):
+                        fname_base = os.path.basename(clean_path)
+                        from urllib.parse import quote
+                        clean_img_url = f"http://127.0.0.1:8000/output/{quote(fname_base)}"
+                        clean_pages_urls.append(clean_img_url)
+                        logger.info(f"📷 Preview page {current_page}: {clean_img_url}")
+                    else:
+                        clean_img_url = None
+
+                # B. THE BRAIN (Classify + Normalize)
+                # Chapter title lookup (both Indonesian and English)
+                chapter_titles = {
+                    "BAB 1": "Tujuan Penggunaan & Keamanan",
+                    "BAB 2": "Instalasi",
+                    "BAB 3": "Panduan Operasional & Pemantauan Klinis",
+                    "BAB 4": "Perawatan, Pemeliharaan & Pembersihan",
+                    "BAB 5": "Pemecahan Masalah",
+                    "BAB 6": "Spesifikasi Teknis & Kepatuhan Standar",
+                    "BAB 7": "Garansi & Layanan",
+                    "Chapter 1": "Intended Use & Safety",
+                    "Chapter 2": "Installation",
+                    "Chapter 3": "Operation & Clinical Monitoring",
+                    "Chapter 4": "Maintenance, Care & Cleaning",
+                    "Chapter 5": "Troubleshooting",
+                    "Chapter 6": "Technical Specifications & Standards",
+                    "Chapter 7": "Warranty & Service"
+                }
+
+                for element in layout_elements:
+                    normalized_result = brain_module.normalize_text(element['text'])
+                    element['text'] = normalized_result['corrected']
+
+                    # Detect element language (from AI or auto-detect from text)
+                    elem_lang = element.get('lang', '')
+                    if not elem_lang:
+                        # Auto-detect: if text is mostly English characters/words
+                        txt_lower = element['text'].lower()
+                        en_keywords = ['the', 'and', 'for', 'user', 'manual', 'this', 'with', 'installation',
+                                       'operation', 'maintenance', 'warning', 'caution', 'chapter',
+                                       'table', 'figure', 'if', 'is', 'are', 'can', 'not', 'may']
+                        en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
+                        elem_lang = 'en' if en_hits >= 2 else 'id'
+
+                    # Use AI-provided chapter if available, else fallback to BioBrain
+                    bab_id = element.get('chapter', '')
+                    if bab_id and bab_id in chapter_titles:
+                        bab_title = chapter_titles[bab_id]
+                    else:
+                        bab_id, bab_title = brain_module.semantic_mapping(element)
+
+                    # Remap BAB→Chapter if content is English
+                    if elem_lang == 'en' and bab_id.startswith('BAB '):
+                        bab_num = bab_id.replace('BAB ', '')
+                        new_key = f"Chapter {bab_num}"
+                        if new_key in chapter_titles:
+                            bab_id = new_key
+                            bab_title = chapter_titles[new_key]
+
+                    structured_data.append({
+                        "chapter_id": bab_id,
+                        "chapter_title": bab_title,
+                        "type": element['type'],
+                        "original": normalized_result['original'],
+                        "normalized": normalized_result['corrected'],
+                        "typos": normalized_result['typos'],
+                        "has_typo": normalized_result['has_typo'],
+                        "text_confidence": normalized_result['confidence'],
+                        "match_score": 100,
+                        "lang": elem_lang,
+                        "crop_url": element.get('crop_url'),
+                        "crop_local": element.get('crop_local')
+                    })
+
+                # Cleanup with retry
+                import time
+                if not isinstance(img_src, str):
+                    for attempt in range(3):
+                        try:
+                            if os.path.exists(page_path):
+                                os.remove(page_path)
+                            break
+                        except PermissionError:
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+
+        # 2.5 CHECK MISSING CHAPTERS (Report only — no auto-generation)
         existing_chapters = set(item['chapter_id'] for item in structured_data)
         
-        # Check for missing Maintenance Chapter (BAB 4)
-        if "BAB 4" not in existing_chapters and hasattr(vision_module, 'generate_chapter_content'):
-            logger.info("⚠️ BAB 4 (Maintenance) is missing. Attempting AI generation...")
-            
-            progress_tracker[session_id].update({
-                "message": "Generating missing Maintenance Chapter (AI)..."
-            })
-            
-            # Context Extraction (Product Knowledge)
-            # Aggregate text from BAB 1 (Info) and BAB 2 (Installation)
-            context_text = []
-            for item in structured_data:
-                if item['chapter_id'] in ["BAB 1", "BAB 2"]:
-                    context_text.append(item['normalized'])
-            
-            product_context = "\n".join(context_text[:50]) # Limit context to first 50 paragraphs to avoid token limits
-            
-            # Generate Logic
-            generated_content = vision_module.generate_chapter_content(
-                topic="BAB 4: Perawatan, Pemeliharaan & Pembersihan",
-                context=product_context
-            )
-            
-            if generated_content and not generated_content.startswith("["):
-                 # Parse paragraphs
-                 lines = generated_content.split('\n')
-                 for line in lines:
-                     if not line.strip(): continue
-                     
-                     is_heading = line.strip().isupper() or line.startswith('#') or line.startswith('**')
-                     
-                     structured_data.append({
-                        "chapter_id": "BAB 4",
-                        "chapter_title": BioBrain().taxonomy["BAB 4"]["title"],
-                        "type": "title" if is_heading else "text",
-                        "original": line,
-                        "normalized": line.replace('**','').replace('#','').strip(),
-                        "typos": [],
-                        "has_typo": False,
-                        "text_confidence": 0.9,
-                        "match_score": 100,
-                        "crop_url": None,
-                        "crop_local": None
-                    })
-                 logger.info("✓ BAB 4 generated successfully.")
+        # Detect document language from existing chapters
+        doc_lang = 'en' if any(ch.startswith('Chapter') for ch in existing_chapters) else 'id'
+        all_chapters = [f"Chapter {i}" for i in range(1, 8)] if doc_lang == 'en' else [f"BAB {i}" for i in range(1, 8)]
+        
+        missing = set(all_chapters) - existing_chapters
+        if missing:
+            logger.info(f"⚠️ Missing chapters: {sorted(missing)}")
 
         # STEP 3: THE ARCHITECT (Build)
+        import json
+        with open('debug_structured_data.json', 'w') as f:
+            json.dump([{'chapter_id': x['chapter_id'], 'text': x['original'][:100]} for x in structured_data], f, indent=2)
+
         progress_tracker[session_id].update({
             "status": "building",
             "percentage": 95,
@@ -1333,7 +1542,7 @@ async def process_workflow(file: UploadFile = File(...)):
             "pdf_url": pdf_url,
             "total_pages": progress_tracker[session_id]["total_pages"],
             "clean_pages": clean_pages_urls, # NEW: List of cleaned page URLs
-            "missing_chapters": list(set(["BAB 1", "BAB 2", "BAB 3", "BAB 4", "BAB 5", "BAB 6", "BAB 7"]) - existing_chapters)
+            "missing_chapters": list(set(all_chapters) - existing_chapters)
         }
 
     except Exception as e:
@@ -1354,10 +1563,11 @@ async def process_workflow(file: UploadFile = File(...)):
              }
 
 @app.post("/supplement/{session_id}")
-async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
+async def supplement_workflow(session_id: str, files: list[UploadFile] = File(...)):
     """
     Endpoint untuk mengupload file tambahan ke sesi yang sudah ada.
     Menggabungkan hasil ekstraksi baru dengan yang lama.
+    Mendukung multiple files upload sekaligus.
     """
     if session_id not in active_sessions:
         return {"success": False, "error": "Session ID not found or expired"}
@@ -1366,80 +1576,102 @@ async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
     original_data = existing_session["structured_data"]
     base_filename = existing_session["original_filename"]
     
-    logger.info(f"Supplementing Session {session_id} with file: {file.filename}")
+    file_names = [f.filename for f in files]
+    logger.info(f"Supplementing Session {session_id} with files: {file_names}")
     
-    temp_path = os.path.join(BASE_PATH, f"temp_supp_{file.filename}")
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    supplementary_data = []
-    
-    # Initialize separate progress for supplement (or update existing?)
-    # For now, let's update the existing session's progress to show activity
     progress_tracker[session_id].update({
         "status": "processing_supplement",
-        "message": f"Processing supplementary file: {file.filename}..."
+        "message": f"Processing {len(files)} supplementary file(s)..."
     })
 
-    try:
-        # STEP 1: IMAGE CONVERSION (Reuse logic)
-        images = []
-        if file.filename.lower().endswith('.pdf'):
-            images = convert_pdf_to_images_safe(temp_path)
-        else:
-            images = [temp_path]
-            
-        total_pages = len(images)
-        current_page_offset = existing_session.get("images_count", 0) + 1
-        
-        # STEP 2: LOOP & PROCESS
-        for i, img_src in enumerate(images):
-            # Resolve image path
-            page_path = img_src
-            if not isinstance(img_src, str):
-                page_path = os.path.join(BASE_PATH, f"supp_{session_id}_{i}.png")
-                img_src.save(page_path, "PNG")
+    supplementary_data = []
+    total_new_pages = 0
 
-            # A. THE EYE (Scan)
-            scan_result = vision_module.scan_document(page_path, f"supp_{file.filename}_{i}")
-            
-            if isinstance(scan_result, list):
-                layout_elements = scan_result
-            else:
-                layout_elements = scan_result.get('elements', [])
-            
-            # B. THE BRAIN (Classify)
-            # Re-initialize Brain module for fresh context?? 
-            # Actually, we might want to pass previous context if we were smart, 
-            # but for now let's just treat it as new chunks that will be appended.
-            brain_module = BioBrain() 
-            
-            for element in layout_elements:
-                normalized_result = brain_module.normalize_text(element['text'])
-                element['text'] = normalized_result['corrected']
-                bab_id, bab_title = brain_module.semantic_mapping(element)
+    try:
+        brain_module = BioBrain() 
+        current_page_offset = existing_session.get("images_count", 0)
+
+        for file_index, file in enumerate(files):
+            temp_path = os.path.join(BASE_PATH, f"temp_supp_{session_id}_{file.filename}")
+            with open(temp_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
                 
-                supplementary_data.append({
-                    "chapter_id": bab_id,
-                    "chapter_title": bab_title,
-                    "type": element['type'],
-                    "original": normalized_result['original'],
-                    "normalized": normalized_result['corrected'],
-                    "typos": normalized_result['typos'],
-                    "has_typo": normalized_result['has_typo'],
-                    "text_confidence": normalized_result['confidence'],
-                    "match_score": 100,
-                    "crop_url": element['crop_url'],
-                    "crop_local": element['crop_local']
-                })
+            # STEP 1: IMAGE CONVERSION (Reuse logic)
+            images = []
+            if file.filename.lower().endswith('.pdf'):
+                images = convert_pdf_to_images_safe(temp_path)
+            else:
+                images = [temp_path]
+                
+            total_pages = len(images)
+            total_new_pages += total_pages
             
-            # Cleanup
-            import time
-            if not isinstance(img_src, str):
-                 try:
-                     if os.path.exists(page_path):
-                         os.remove(page_path)
-                 except: pass
+            # STEP 2: LOOP & PROCESS
+            for i, img_src in enumerate(images):
+                # Resolve image path
+                page_path = img_src
+                if not isinstance(img_src, str):
+                    page_path = os.path.join(BASE_PATH, f"supp_{session_id}_{file_index}_{i}.png")
+                    img_src.save(page_path, "PNG")
+
+                # A. THE EYE (Scan)
+                scan_result = vision_module.scan_document(page_path, f"supp_{file.filename}_{i}")
+                
+                if isinstance(scan_result, list):
+                    layout_elements = scan_result
+                else:
+                    layout_elements = scan_result.get('elements', [])
+                
+                # B. THE BRAIN (Classify)
+                for element in layout_elements:
+                    normalized_result = brain_module.normalize_text(element['text'])
+                    element['text'] = normalized_result['corrected']
+                    
+                    # Cek missing chapter assignment
+                    bab_id, bab_title = "", ""
+                    existing_chapter_ids = set(item.get('chapter_id') for item in original_data + supplementary_data if item.get('chapter_id'))
+                    # Detect language from existing chapters
+                    supp_lang = 'en' if any(ch.startswith('Chapter') for ch in existing_chapter_ids) else 'id'
+                    all_ch = [f"Chapter {i}" for i in range(1, 8)] if supp_lang == 'en' else [f"BAB {i}" for i in range(1, 8)]
+                    missing_chapters = [c for c in all_ch if c not in existing_chapter_ids]
+
+                    if missing_chapters and len(element['text'].strip()) > 10:
+                        bab_id, bab_title = brain_module.semantic_mapping(element)
+                        
+                        # Jika Fallback ke BAB 1/Chapter 1 padahal sudah ada, alokasikan ke missing chapter pertama
+                        first_ch = all_ch[0]
+                        if bab_id == first_ch and first_ch not in missing_chapters:
+                            bab_id = missing_chapters[0]
+                            bab_title = brain_module.taxonomy[bab_id]["title"]
+                            brain_module.current_context = bab_id
+                    else:
+                        bab_id, bab_title = brain_module.semantic_mapping(element)
+                    
+                    supplementary_data.append({
+                        "chapter_id": bab_id,
+                        "chapter_title": bab_title,
+                        "type": element['type'],
+                        "original": normalized_result['original'],
+                        "normalized": normalized_result['corrected'],
+                        "typos": normalized_result['typos'],
+                        "has_typo": normalized_result['has_typo'],
+                        "text_confidence": normalized_result['confidence'],
+                        "match_score": 100,
+                        "crop_url": element['crop_url'],
+                        "crop_local": element['crop_local']
+                    })
+                
+                # Cleanup
+                import time
+                if not isinstance(img_src, str):
+                     try:
+                         if os.path.exists(page_path):
+                             os.remove(page_path)
+                     except: pass
+            
+            # Cleanup temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
         # STEP 3: MERGE & RE-BUILD
         combined_data = original_data + supplementary_data
@@ -1449,7 +1681,7 @@ async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
         
         # Update session data
         active_sessions[session_id]["structured_data"] = combined_data
-        active_sessions[session_id]["images_count"] += total_pages
+        active_sessions[session_id]["images_count"] += total_new_pages
         
         # Re-run Architect
         progress_tracker[session_id]["message"] = "Regenerating reports with merged data..."
@@ -1463,6 +1695,10 @@ async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
             "message": "Supplementary merge complete!"
         })
         
+        # Detect language for missing chapters
+        supp_lang = 'en' if any(item['chapter_id'].startswith('Chapter') for item in combined_data if item.get('chapter_id')) else 'id'
+        all_ch_final = [f"Chapter {i}" for i in range(1, 8)] if supp_lang == 'en' else [f"BAB {i}" for i in range(1, 8)]
+        
         return {
             "success": True,
             "session_id": session_id,
@@ -1470,15 +1706,13 @@ async def supplement_workflow(session_id: str, file: UploadFile = File(...)):
             "word_url": word_url,
             "pdf_url": pdf_url,
             "total_pages": active_sessions[session_id]["images_count"],
-            "missing_chapters": list(set(["BAB 1", "BAB 2", "BAB 3", "BAB 4", "BAB 5", "BAB 6", "BAB 7"]) - set(item['chapter_id'] for item in combined_data))
+            "missing_chapters": list(set(all_ch_final) - set(item['chapter_id'] for item in combined_data))
         }
 
     except Exception as e:
         logger.error(f"Supplement Workflow Failed: {e}")
         return {"success": False, "error": str(e)}
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        pass
 
 # Helper
 def convert_pdf_to_images_safe(path):

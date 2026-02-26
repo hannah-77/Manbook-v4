@@ -1,0 +1,264 @@
+MOL-02
+BUKU MANUAL
+DAFTAR ISI
+BAB 1   Tujuan Penggunaan & Keamanan	3
+BAB 2   Instalasi	5
+BAB 3   Panduan Operasional & Pemantauan Klinis	6
+BAB 4   Perawatan, Pemeliharaan & Pembersihan	7
+BAB 5   Pemecahan Masalah	9
+BAB 6   Spesifikasi Teknis & Kepatuhan Standar	10
+BAB 7   Garansi & Layanan	11
+BAB 1: Tujuan Penggunaan & Keamanan
+[ TABLE ]
+[ TABLE ]
+BAB 2: Instalasi
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 3: Panduan Operasional & Pemantauan Klinis
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 4: Perawatan, Pemeliharaan & Pembersihan
+BAB 4: PERAWATAN, PEMELIHARAAN & PEMBERSIHAN
+---
+4.1 Pendahuluan
+Perawatan, pemeliharaan, dan pembersihan yang tepat merupakan faktor krusial untuk memastikan kinerja optimal, keamanan pasien, dan longevity (umur pakai) perangkat medis. Bab ini memberikan panduan komprehensif mengenai prosedur perawatan rutin, pemeliharaan preventif, serta teknik pembersihan dan disinfektan yang harus dilakukan secara berkala oleh petugas yang terlatih.
+Penting: Seluruh prosedur dalam bab ini harus dilakukan oleh персонал yang telah menerima pelatihan memadai dan memahami risiko yang terkait dengan penanganan perangkat medis.
+---
+4.2 Peringatan Keamanan Umum
+Sebelum melakukan perawatan, pemeliharaan, atau pembersihan, perhatikan peringatan berikut:
+4.2.1 Peringatan Listrik
+- ▢ Pastikan perangkat dalam kondisi MATI dan terputus dari sumber listrik sebelum memulai prosedur pembersihan atau pemeliharaan internal
+- ▢ Jangan pernah membersihkan perangkat saat sedang terhubung ke stopkontak
+- ▢ Hindari masuknya cairan ke dalam komponen listrik
+- ▢ Gunakan hanya kabel daya dan adaptor yang disertakan oleh produsen
+4.2.2 Peringatan Kontaminasi
+- ▢ Kenakan APD (Alat Pelindung Diri) yang sesuai, termasuk sarung tangan medis, masker, dan gaun pelindung
+- ▢ Buang bahan habis pakai yang terkontaminasi sesuai dengan protokol fasilitas untuk limbah medis infeksius
+- ▢ Lakukan prosedur pencucian tangan sebelum dan setelah menangani perangkat
+4.2.3 Peringatan Kerusakan
+- ▢ Jangan gunakan pembersih abrasif, pelarut kuat, atau bahan kimia yang tidak disetujui
+- ▢ Hindari menjatuhkan atau memberikan dampak keras pada perangkat
+- ▢ Periksa kondisi fisik perangkat secara visual sebelum setiap penggunaan
+---
+4.3 Perawatan Rutin Harian
+Perawatan rutin harian harus dilakukan sebelum dan sesudah setiap penggunaan perangkat untuk memastikan hygiene dan fungsi yang optimal.
+4.3.1 Pemeriksaan Visual Sebelum Penggunaan
+Lakukan pemeriksaan visual berikut setiap kali sebelum mengoperasikan perangkat:
+1. Periksa kondisi fisik perangkat:
+- Tidak ada kerusakan fisik seperti retak, pecah, atau komponen yang longgar
+- Kabel daya tidak menunjukkan tanda-tanda kerusakan, sobekan, atau exposure
+- Steker dan konektor dalam kondisi bersih dan tidak berkarat
+2. Periksa indikator dan display:
+- Semua lampu indikator berfungsi normal
+- Display menunjukkan pembacaan yang benar sesuai dengan zero verification
+- Tidak ada pesan kesalahan atau warning pada layar
+3. Periksa aksesoris dan consumables:
+- Aksesoris yang diperlukan terpasang dengan benar
+- Consumables tidak kedaluwarsa dan disimpan sesuai ketentuan
+- Filter dan komponen yang diganti secara berkala dalam kondisi baik
+4.3.2 Prosedur Pembersihan Rutin
+Bahan yang diperlukan:
+- Lap microfiber bersih dan lembut
+- Disinfektan level intermediate (misalnya: larutan sodium hipoklorit 0,1% atau produk yang disetujui)
+- Air destilasi atau deionisasi
+- Sarung tangan sekali pakai
+Langkah-langkah pembersihan:
+1. Persiapan:
+- Matikan perangkat dan cabut kabel daya dari stopkontak
+- Kenakan sarung tangan medis
+- Siapkan larutan pembersih sesuai rekomendasi produsen
+2. Pembersihan permukaan eksternal:
+- Basahi lap dengan larutan pembersih yang sudah diencerkan
+- Usap permukaan perangkat dengan gerakan memutar yang lembut
+- Fokus pada area yang sering disentuh (tombol, handle, panel kontrol)
+- Hindari bagian konektor dan port listrik
+3. Pembersihan aksesoris:
+- Lepas semua aksesoris yang dapat dilepas
+- Bersihkan masing-masing aksesoris sesuai petunjuk spesifik
+- Bilas dengan air bersih jika diperlukan
+- Keringkan completely sebelum pasang kembali
+4. Pembersihan komponen internal (jika applicable):
+- Hanya dilakukan oleh teknisi yang terlatih
+- Ikuti prosedur spesifik yang tertera dalam bab pemeliharaan teknis
+- Dokumentasikan setiap intervensi internal
+5. Pengeringan dan penyimpanan:
+- Keringkan seluruh permukaan dengan lap kering bersih
+- Biarkan perangkat mengering di udara terbuka selama minimal 15 menit
+- Simpan di tempat yang kering dan terlindung dari debu
+---
+4.4 Pemeliharaan Preventif
+Pemeliharaan preventif dilakukan secara berkala untuk memastikan perangkat beroperasi dalam spesifikasi yang diberikan dan untuk mencegah kegagalan yang tidak terduga.
+4.4.1 Jadwal Pemeliharaan Berkala
+| Komponen | Frekuensi | Tindakan |
+|----------|-----------|----------|
+| Pembersihan permukaan eksternal | Setiap hari / setelah setiap penggunaan | Sesuai prosedur Bab 4.3.2 |
+| Kalibrasi | Setiap 6 bulan atau sesuai rekomendasi produsen | Oleh teknisi tersertifikasi |
+| Penggantian filter | Setiap 3-6 bulan atau sesuai indikator | Sesuai prosedur Bab 4.4.2 |
+| Inspeksi kabel daya | Setiap bulan | Periksa kerusakan fisik |
+| Pemeriksaan keselamatan listrik | Setiap 12 bulan | Oleh teknisi listrik tersertifikasi |
+| Service umum | Setiap 12 bulan | Oleh pusat layanan resmi |
+4.4.2 Penggantian Komponen Consumable
+Filter:
+1. Matikan perangkat dan biarkan dingin selama minimal 10 menit
+2. Buka kompartemen filter sesuai petunjuk pada perangkat
+3. Lepas filter lama dengan menarik perlahan ke arah yang ditunjukkan
+4. Periksa kondisi filter lama untuk menentukan apakah ada masalah operasional
+5. Pasang filter baru pastikan terpasang rapat dan sealed dengan benar
+6. Tutup kompartemen filter dan kencangkan baut pengunci
+7. Nyalakan perangkat dan verifikasi tidak ada kebocoran udara
+8. Catat tanggal penggantian dalam log pemeliharaan
+Baterai (jika applicable):
+1. Gunakan hanya baterai asli dari produsen
+2. Lakukan calibration baterai setiap 3 bulan pertama kali digunakan
+3. Ganti baterai jika kapasitas tereduksi >20% dari spesifikasi awal
+4. Buang baterai bekas sesuai regulasi lingkungan yang berlaku
+4.4.3 Kalibrasi dan Verifikasi Akurasi
+Kalibrasi harus dilakukan oleh персонал yang terlatih menggunakan standar yang tersertifikasi.
+Prosedur kalibrasi:
+1. Siapkan standar kalibrasi yang tertraceable ke NIST atau laboratorium terakreditasi
+2. Verifikasi kondisi lingkungan (suhu 20-25°C, kelembaban 40-60%)
+3. Lakukan zero adjustment sesuai prosedur
+4. Ukur pada minimal 5 titik rentang pengukuran
+5. Bandingkan hasil dengan spesifikasi toleransi
+6. Jika berada di luar toleransi, lakukan penyesuaian atau servis
+7. Dokumentasikan hasil kalibrasi lengkap dengan tanggal, teknisi, dan standar yang digunakan
+---
+4.5 Prosedur Desinfekti dan Sterilisasi
+Tingkat disinfeksi yang diperlukan tergantung pada jenis penggunaan dan tingkat kontak dengan pasien.
+4.4.1 Klasifikasi Tingkat Proses
+| Tingkat | Aplikasi | Metode yang Direkomendasikan |
+|---------|----------|------------------------------|
+| Low | Permukaan tanpa kontak langsung pasien | Pembersihan dengan disinfektan level rendah |
+| Intermediate | Permukaan yang bersentuhan dengan kulit intact | Disinfektan level intermediate |
+| High | Permukaan yang bersentuhan dengan luka atau mucous membrane | Sterilisasi atau disinfektan level tinggi |
+4.5.2 Pemilihan Disinfektan
+Pilih disinfektan yang efektif dengan mempertimbangkan:
+- Spektrum antimikroba: Efektif terhadap bakteri, virus, dan jamur yang relevan
+- Kompatibilitas material: Tidak merusak permukaan perangkat
+- Waktu kontak: Sesuai dengan rekomendasi produsen
+- Keamanan: Tidak berbahaya bagi оператор jika digunakan sesuai petunjuk
+Disinfektan yang direkomendasikan:
+- Larutan sodium hipoklorit 0,1% (1000 ppm)
+- Alkohol isopropil 70%
+- Produk berbasis hidrogen peroksida
+- Quaternary ammonium compounds (untuk permukaan eksternal)
+Disinfektan yang harus dihindari:
+- Formaldehida
+- Larutan iodofor berkonsentrasi tinggi
+- Pembersih berbasis abrasive
+- Pelarut organik (aseton, thinner)
+4.5.3 Prosedur Desinfekti Langkah demi Langkah
+1. Persiapan:
+- Lakukan pembersihan terlebih dahulu untuk menghilangkan debris organik
+- Kenakan APD lengkap (sarung tangan, masker, eye protection)
+- Siapkan larutan disinfektan sesuai konsentrasi yang direkomendasikan
+2. Aplikasi disinfektan:
+- Aplikasikan menggunakan spray atau wipe secara merata
+- Pastikan seluruh permukaan terbasahi
+- Perhatikan waktu kontak minimum yang diperlukan
+3. Waktu kontak:
+- Biarkan disinfektan bekerja sesuai waktu kontak yang direkomendasikan
+- Jangan wipe atau bilas selama periode kontak berlangsung
+4. Pembilasan (jika diperlukan):
+- Bilas permukaan dengan air steril untuk residue disinfektan
+- Keringkan dengan lap steril atau biarkan kering di udara
+5. Verifikasi:
+- Periksa visually bahwa tidak ada residu yang tersisa
+- Dokumentasikan prosedur dalam log desinfection
+4.5.4 Sterilisasi (Jika Diperlukan)
+Untuk komponen yang memerlukan sterilisasi:
+Sterilisasi uap (autoclave):
+- Suhu: 121°C atau 134°C
+- Tekanan: 15-30 psi
+- Waktu: 15-30 menit tergantung pada suhu
+- Hanya untuk komponen yang labeled autoclavable
+EtO (Ethylene Oxide):
+- Hanya dilakukan oleh fasilitas yang terizin
+- Memerlukan aerasi yang memadai sebelum penggunaan
+- Untuk komponen sensitif panas
+PENTING: Selalu verifikasi kompatibilitas metode sterilisasi dengan panduan produsen untuk setiap komponen spesifik.
+---
+4.6 Penyimpanan dan Transport
+Penyimpanan yang tepat sangat penting untuk menjaga integritas dan fungsi perangkat.
+4.6.1 Kondisi Penyimpanan
+- Suhu: 15-30°C (kecuali spesifikasi lain dari produsen)
+- Kelembaban: 30-70% RH (tanpa kondensasi)
+- Lokasi: Bersih, kering, terlindung dari sinar matahari langsung
+- Ventilasi: Cukup untuk mencegah penumpukan kelembaban
+4.6.2 Prosedur Penyimpanan Jangka Panjang
+1. Lakukan pembersihan dan desinfection lengkap
+2. Lepas semua consumables (baterai, filter, dll.) jika akan disimpan >30 hari
+3. Tutup semua port dengan caps pelindung untuk mencegah kontaminasi
+4. Simpan dalam posisi seperti yang direkomendasikan (vertikal/horizontal)
+5. Gunakan cover pelindung yang disediakan
+6. Catat tanggal penyimpanan dan kondisi saat itu
+4.6.3 Transport
+Ketika memindahkan perangkat:
+- ▢ Gunakan case/kemasan asli atau yang disetujui produsen
+- ▢ Amankan komponen internal dari gerakan
+- ▢ Lindungi dari kelembaban dan suhu ekstrem
+- ▢ Beri label "FRAGILE" untuk penanganan khusus
+- ▢ Dokumentasikan kondisi saat serah terima
+---
+4.7 Pemecahan Masalah Perawatan
+4.7.1 Masalah Umum dan Solusi
+| Gejala | Kemungkinan Penyebab | Tindakan Perbaikan |
+|--------|---------------------|-------------------|
+| Perangkat tidak menyala | Kabel daya tidak terhubung/ rusak | Periksa koneksi dan kabel daya |
+| Hasil pembacaan tidak stabil | Kontak elektroda kotor | Bersihkan elektroda sesuai prosedur |
+| Bau tidak sedap dari perangkat | Kontaminasi mikroba | Lakukan desinfection mendalam |
+| Indikator error berkedip | Komponen perlu diganti | Cek manual error codes |
+| Permukaan lengket | Residu disinfektan | Bilas dan keringkan kembali |
+4.7.2 Kapan Menghubungi Layanan Teknis
+Hubungi teknisi atau pusat layanan resmi jika:
+- Kerusakan fisik yang mempengaruhi keamanan
+- Masalah yang tidak dapat diatasi dengan pemecahan masalah dasar
+- Indikasi kerusakan komponen internal
+- Kebutuhan kalibrasi di luar kapasitas fasilitas
+- Unit membutuhkan perbaikan atau penggantian komponen major
+---
+4.8 Pembuangan Akhir Pakai (End of Life)
+Ketika perangkat mencapai akhir masa pakai atau tidak dapat diperbaiki:
+1. Data dan keamanan:
+- Hapus semua data pasien yang tersimpan
+- Kembalikan ke pengaturan pabrik jika memungkinkan
+2. Komponen yang dapat didaur ulang:
+- Pisahkan komponen elektronik untuk daur ulang e-waste
+- Logam dan plastik dapat diproses sesuai regulasi lokal
+3. Pembuangan sesuai regulasi:
+- Ikuti regulasi pembuangan limbah medis fasilitas
+- Jangan membuang perangkat keras dalam limbah umum
+- Hubungi penyedia layanan daur ulang medis yang tersertifikasi
+---
+4.9 Catatan Penggunaan Log Pemeliharaan
+Direkomendasikan untuk menjaga log pemeliharaan yang mencakup:
+- Tanggal dan waktu setiap prosedur perawatan
+- Nama petugas yang melakukan prosedur
+- Deskripsi pekerjaan yang dilakukan
+- Komponen yang diganti
+- Hasil kalibrasi dan verifikasi
+- Masalah yang ditemukan dan tindakan yang diambil
+- Tanda tangan dan stempel
+Log pemeliharaan harus disimpan selama minimal 5 tahun atau sesuai regulasi yang berlaku.
+---
+4.10 Informasi Dukungan Teknis
+Untuk pertanyaan lebih lanjut mengenai perawatan, pemeliharaan, dan pembersihan:
+Layanan Pelanggan:
+- Telepon: [Nomor layanan pelanggan]
+- Email: [Alamat email dukungan]
+- Jam operasional: [Hari dan jam kerja]
+Service Center Resmi:
+- Lokasi: [Alamat service center]
+- Hubungi terlebih dahulu untuk menjadwalkan kunjungan
+Suku Cadang dan Consumables:
+- Pesan melalui [cara pemesanan]
+- Pastikan nomor model dan serial number tersedia
+---
+CATATAN PENTING:
+Informasi dalam bab ini bersifat umum. Untuk prosedur spesifik yang lebih detail, selalu merujuk ke Manual Servis yang disediakan secara terpisah atau hubungi layanan teknis produsen. Setiap prosedur yang menyimpang dari panduan ini dapat membatalkan garansi dan mempengaruhi keamanan pasien.
+---
+*Dokumen ini merupakan bagian dari User Manual dan harus disimpan bersama perangkat untuk referensi di masa mendatang.*
+BAB 5: Pemecahan Masalah
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 6: Spesifikasi Teknis & Kepatuhan Standar
+[ Tidak ada konten terdeteksi pada bab ini ]
+BAB 7: Garansi & Layanan
+[ Tidak ada konten terdeteksi pada bab ini ]

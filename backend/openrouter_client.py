@@ -22,8 +22,8 @@ logger = logging.getLogger("OpenRouterClient")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-AI_MODEL           = os.getenv("AI_MODEL",    "deepseek/deepseek-r1")
-AI_PROVIDER        = os.getenv("AI_PROVIDER", "deepinfra/fp4")
+AI_MODEL           = os.getenv("AI_MODEL",    "minimax/minimax-m2.5")
+AI_PROVIDER        = os.getenv("AI_PROVIDER", "")  # Empty = auto-select
 AI_ALLOW_FALLBACKS = os.getenv("AI_ALLOW_FALLBACKS", "false").strip().lower() in ("true", "1", "yes")
 
 
@@ -40,7 +40,7 @@ class OpenRouterClient:
         else:
             logger.warning("⚠️  OPENROUTER_API_KEY tidak ditemukan di .env")
 
-    def call(self, prompt, timeout=30):
+    def call(self, prompt, image_base64=None, timeout=30):
         if not self.is_available:
             return None
 
@@ -51,14 +51,32 @@ class OpenRouterClient:
             "Content-Type":  "application/json",
         }
 
+        # Multi-modal support
+        if image_base64:
+            message_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_base64}"
+                    }
+                }
+            ]
+        else:
+            message_content = prompt
+
         payload = {
             "model":    self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "provider": {
+            "messages": [{"role": "user", "content": message_content}],
+        }
+        # Only force a specific provider when explicitly set.
+        # For vision/image calls, we need auto-routing to find a compatible endpoint.
+        if self.provider:
+            payload["provider"] = {
                 "order":           [self.provider],
                 "allow_fallbacks": self.allow_fallbacks,
-            },
-        }
+            }
+
 
         for attempt in range(3):
             try:

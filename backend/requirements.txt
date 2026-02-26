@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-paddleocr
+paddleocr==2.8.1
 paddlepaddle==2.6.2
 rapidfuzz
 python-multipart
@@ -14,6 +14,6 @@ reportlab
 python-docx
 pyspellchecker
 docx2pdf
-google-generativeai
 python-dotenv
 openai
+httpx
