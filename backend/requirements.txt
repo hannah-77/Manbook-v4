@@ -17,3 +17,8 @@ docx2pdf
 python-dotenv
 openai
 httpx
+pytesseract
+requests
+opencv-python-headless
+langdetect
+PyPDF2

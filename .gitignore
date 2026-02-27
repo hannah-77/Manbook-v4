@@ -43,6 +43,7 @@ desktop.ini
 
 # Backend specific
 backend/venv/
+backend/venv311/
 backend/dist/
 backend/build/
 backend/*.spec
@@ -53,6 +54,14 @@ backend/*.docx
 backend/*.png
 backend/*.jpg
 backend/*.jpeg
+backend/_archive_samples/
+backend/_archive_debug/
+backend/_archive_temp/
+
+# Debug / dump files
+backend/dump*.txt
+backend/res_dump.txt
+backend/debug_*.json
 
 # Frontend specific
 frontend/.dart_tool/

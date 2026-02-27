@@ -100,14 +100,14 @@ class BioVisionHybrid:
         )
 
         # ── Stage 2: OCR Engines ──
-        # PRIMARY: Tesseract (has dedicated Indonesian + English language packs)
+        # INDONESIAN: Tesseract OCR (lang pack 'ind')
         if TESSERACT_AVAILABLE:
-            logger.info("✓ Tesseract OCR: PRIMARY engine (ind + eng)")
+            logger.info("✓ Tesseract OCR: Ready (Indonesian)")
         else:
-            logger.info("⚠️ Tesseract unavailable — PaddleOCR will be used")
+            logger.info("⚠️ Tesseract unavailable — PaddleOCR will be used as fallback for Indonesian")
 
-        # FALLBACK: PaddleOCR (used when Tesseract is unavailable)
-        logger.info("Initializing PaddleOCR (fallback OCR engine)...")
+        # ENGLISH: PaddleOCR (lang 'en')
+        logger.info("Initializing PaddleOCR: Ready (English)...")
         self.ocr_engine = PaddleOCR(
             use_angle_cls=True,
             lang='en',
@@ -117,15 +117,78 @@ class BioVisionHybrid:
         logger.info("✓ Hybrid Vision Pipeline v6 Ready")
 
     # ═══════════════════════════════════════════════════════════════
-    # STAGE 1: Layout Detection (PPStructure)
+    # HELPER: Detect Bordered Boxes (letterheads, company headers)
+    # ═══════════════════════════════════════════════════════════════
+    def _detect_bordered_boxes(self, image_cv):
+        """
+        Detect rectangular regions with visible borders using OpenCV contours.
+        Catches company letterheads and framed tables that PPStructure would
+        break into individual text line regions.
+
+        Returns list of [x1, y1, x2, y2].
+        """
+        h, w = image_cv.shape[:2]
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+
+        # Threshold: dark lines on white — finds borders/outlines
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        bordered = []
+        min_area = (w * h) * 0.008   # minimum 0.8% of page
+        max_area = (w * h) * 0.65    # maximum 65% of page
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:
+                continue
+
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
+
+            # Accept 3-6 corner shapes (rectangles, slight distortions)
+            if not (3 <= len(approx) <= 6):
+                continue
+
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            if bw < w * 0.25 or bh < 10:
+                continue
+
+            # Fill ratio: border boxes have low fill (hollow inside)
+            rect_area = bw * bh
+            fill_ratio = area / rect_area if rect_area > 0 else 0
+            if fill_ratio > 0.50:
+                continue  # Solid block, not a border
+
+            pad = 8
+            bordered.append([
+                max(0, x - pad), max(0, y - pad),
+                min(w, x + bw + pad), min(h, y + bh + pad)
+            ])
+            logger.info(f"\U0001f4e6 Border detected at y={y}-{y+bh}, "
+                        f"size={bw}x{bh}, fill={fill_ratio:.2f}")
+
+        return bordered
+
+    # ═══════════════════════════════════════════════════════════════
+    # STAGE 1: Layout Detection (PPStructure + bordered-box detection)
     # ═══════════════════════════════════════════════════════════════
     def _detect_layout(self, image_cv):
         """
         Detect page regions using PPStructure.
+        Before handing off to PPStructure, we first detect bordered rectangles
+        (letterheads, company boxes) via OpenCV — those are marked as 'table'
+        type so they get cropped as images, not OCR'd line by line.
+
         Returns list of {"type": str, "bbox": [x1,y1,x2,y2]}
         Types: heading, paragraph, table, figure
         """
         h, w = image_cv.shape[:2]
+
+        # ── PRE-PASS: Detect bordered boxes with OpenCV ──────────
+        bordered_boxes = self._detect_bordered_boxes(image_cv)
+        # We'll use these to override PPStructure results later
 
         try:
             results = self.layout_engine(image_cv)
@@ -170,6 +233,71 @@ class BioVisionHybrid:
                     "bbox": [x1, y1, x2, y2]
                 })
 
+            # ── OVERRIDE: Merge PPStructure sub-regions inside bordered boxes ──
+            # If OpenCV detected a bordered rectangle (e.g. company letterhead),
+            # any PPStructure regions that fall inside it are REMOVED and replaced
+            # by the single bordered box as a 'table' type (will be cropped as image).
+            if bordered_boxes:
+                # For each bordered box, check which PPStructure regions it contains
+                final_regions = []
+                covered_indices = set()
+
+                for bx1, by1, bx2, by2 in bordered_boxes:
+                    # Find all PPStructure regions that overlap significantly
+                    # with this border box
+                    inside = []
+                    for idx, region in enumerate(regions):
+                        rx1, ry1, rx2, ry2 = region['bbox']
+                        # Compute overlap
+                        ox1 = max(bx1, rx1)
+                        oy1 = max(by1, ry1)
+                        ox2 = min(bx2, rx2)
+                        oy2 = min(by2, ry2)
+                        if ox2 > ox1 and oy2 > oy1:
+                            overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                            region_area  = (rx2 - rx1) * (ry2 - ry1) or 1
+                            if overlap_area / region_area > 0.40:
+                                inside.append(idx)
+
+                    if inside:
+                        # Replace all sub-regions with one bordered box region
+                        for idx in inside:
+                            covered_indices.add(idx)
+                        final_regions.append({"type": "table", "bbox": [bx1, by1, bx2, by2]})
+                        logger.info(
+                            f"📦 BorderBox override: merged {len(inside)} sub-regions "
+                            f"at y={by1}-{by2} → single 'table' crop"
+                        )
+
+                # Add remaining PPStructure regions not inside any border
+                for idx, region in enumerate(regions):
+                    if idx not in covered_indices:
+                        final_regions.append(region)
+
+                # Sort by vertical position
+                final_regions.sort(key=lambda r: r['bbox'][1])
+                regions = final_regions
+
+            # ── Aspect-ratio heuristic (secondary pass) ──────────────────
+            # Catches wide/short text regions that still look like boxes
+            # but don't have a visible border OpenCV could detect.
+            for region in regions:
+                if region['type'] in ('table', 'figure'):
+                    continue
+                rx1, ry1, rx2, ry2 = region['bbox']
+                rw = rx2 - rx1
+                rh = ry2 - ry1
+                if rh == 0:
+                    continue
+                aspect    = rw / rh
+                width_pct = rw / w
+                top_pct   = ry1 / h
+
+                if aspect >= 4.0 and width_pct >= 0.5 and top_pct <= 0.40:
+                    region['type'] = 'table'
+                    logger.info(f"📦 AspectHeuristic: promoted region y={ry1} "
+                                f"to 'table' (aspect={aspect:.1f}, w={width_pct:.0%})")
+
             logger.info(f"📐 Layout: {len(regions)} regions "
                         f"({sum(1 for r in regions if r['type'] == 'heading')} headings, "
                         f"{sum(1 for r in regions if r['type'] == 'table')} tables, "
@@ -179,6 +307,7 @@ class BioVisionHybrid:
         except Exception as e:
             logger.error(f"Layout detection failed: {e}")
             return []
+
 
     # ═══════════════════════════════════════════════════════════════
     # PREPROCESSING: Watermark Removal + Denoising (for OCR)
@@ -236,9 +365,14 @@ class BioVisionHybrid:
     def _extract_text(self, image_cv, bbox, lang='en'):
         """
         Extract text from a specific region.
-        OCR engine is selected based on language:
-          - 'id' → Tesseract with Indonesian language pack
-          - 'en' → PaddleOCR with English model
+        OCR engine is selected STRICTLY based on language:
+          'id' → Tesseract OCR (Indonesian lang pack 'ind')
+                 Fallback to PaddleOCR if Tesseract not installed
+          'en' → PaddleOCR ONLY (English model)
+
+        These are two completely separate OCR engines — one per language.
+        The engine used is determined SOLELY by the language the user
+        selected in the UI before uploading.
         """
         x1, y1, x2, y2 = bbox
         crop = image_cv[y1:y2, x1:x2]
@@ -249,37 +383,65 @@ class BioVisionHybrid:
         # Preprocess: clean watermark + denoise
         clean_crop = self._preprocess_for_ocr(crop)
 
-        # ── INDONESIAN → Tesseract OCR ──
-        if lang == 'id' and TESSERACT_AVAILABLE:
+        # ════════════════════════════════════════════════════
+        # INDONESIAN → Tesseract OCR (lang pack 'ind')
+        # ════════════════════════════════════════════════════
+        if lang == 'id':
+            if TESSERACT_AVAILABLE:
+                try:
+                    rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(rgb)
+
+                    config = '--oem 3 --psm 6'
+                    data = pytesseract.image_to_data(
+                        pil_img, lang='ind', config=config,
+                        output_type=pytesseract.Output.DICT
+                    )
+
+                    words = []
+                    confidences = []
+                    for i, txt in enumerate(data['text']):
+                        txt = txt.strip()
+                        conf = int(data['conf'][i])
+                        if txt and conf > 30:
+                            words.append(txt)
+                            confidences.append(conf / 100.0)
+
+                    if words:
+                        avg_conf = sum(confidences) / len(confidences)
+                        return ' '.join(words), avg_conf
+                    return "", 0.0
+
+                except Exception as e:
+                    logger.warning(f"Tesseract (ind) failed: {e}")
+                    # Tesseract failed mid-process — do NOT silently drop, use PaddleOCR
+
+            else:
+                logger.warning("⚠️ Tesseract not available — using PaddleOCR as fallback for Indonesian")
+
+            # Fallback: PaddleOCR for Indonesian (when Tesseract unavailable or crashed)
             try:
-                rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(rgb)
-
-                config = '--oem 3 --psm 6'
-                data = pytesseract.image_to_data(
-                    pil_img, lang='ind', config=config,
-                    output_type=pytesseract.Output.DICT
-                )
-
-                words = []
-                confidences = []
-                for i, txt in enumerate(data['text']):
-                    txt = txt.strip()
-                    conf = int(data['conf'][i])
-                    if txt and conf > 30:
-                        words.append(txt)
-                        confidences.append(conf / 100.0)
-
-                if words:
-                    avg_conf = sum(confidences) / len(confidences)
-                    return ' '.join(words), avg_conf
-
+                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
+                if ocr_result and ocr_result[0]:
+                    lines, confidences = [], []
+                    for line in ocr_result[0]:
+                        text = line[1][0]
+                        conf = line[1][1]
+                        if conf > 0.4:
+                            lines.append(text)
+                            confidences.append(conf)
+                    if lines:
+                        avg_conf = sum(confidences) / len(confidences)
+                        return " ".join(lines), avg_conf
             except Exception as e:
-                logger.warning(f"Tesseract (ind) failed: {e}")
-                return "", 0.0
+                logger.warning(f"PaddleOCR fallback (id) failed: {e}")
 
-        # ── ENGLISH → PaddleOCR ──
-        else:
+            return "", 0.0
+
+        # ════════════════════════════════════════════════════
+        # ENGLISH → PaddleOCR ONLY (lang model 'en')
+        # ════════════════════════════════════════════════════
+        else:  # lang == 'en'
             try:
                 ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
                 if ocr_result and ocr_result[0]:
@@ -299,7 +461,7 @@ class BioVisionHybrid:
             except Exception as e:
                 logger.warning(f"PaddleOCR (en) failed: {e}")
 
-        return "", 0.0
+            return "", 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # STAGE 3: AI Chapter Classification (TEXT-ONLY — no image!)
@@ -422,8 +584,12 @@ Output ONLY the JSON array, nothing else."""
             logger.warning("⚠️ No layout regions detected — OCR-ing full page")
             regions = [{"type": "paragraph", "bbox": [0, 0, w, h]}]
 
-        # ── STAGE 2: Text Extraction ──────────────────────────────
-        logger.info(f"📝 Stage 2: Text extraction (PaddleOCR) for {len(regions)} regions...")
+        # NOTE: Visual-box heuristic is applied inside _detect_layout()
+
+
+        # ── STAGE 2: Text Extraction ────────────────────────────────────
+        ocr_engine_name = "Tesseract (ind)" if (lang == 'id' and TESSERACT_AVAILABLE) else "PaddleOCR (en)"
+        logger.info(f"📝 Stage 2: Text extraction [{ocr_engine_name}] for {len(regions)} regions...")
         elements = []
 
         for region in regions:
