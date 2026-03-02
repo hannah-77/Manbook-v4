@@ -44,6 +44,20 @@ except Exception as e:
     VISION_ENGINE_AVAILABLE = False
     logging.warning(f"Vision Engine not available: {e}")
 
+try:
+    from text_corrector import correct_ocr_text as _ocr_correct
+    TEXT_CORRECTOR_AVAILABLE = True
+    logging.info("✓ TextCorrector loaded")
+except Exception as e:
+    TEXT_CORRECTOR_AVAILABLE = False
+    logging.warning(f"TextCorrector not available: {e}")
+
+def apply_text_correction(text: str, lang: str = 'id') -> str:
+    """Terapkan koreksi OCR jika text_corrector tersedia."""
+    if TEXT_CORRECTOR_AVAILABLE and text and text.strip():
+        return _ocr_correct(text, lang=lang)
+    return text
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -477,7 +491,10 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             # B. THE BRAIN (Classify + Normalize)
             for element in layout_elements:
                 normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
-                element['text'] = normalized_result['corrected']
+                # Terapkan text_corrector SETELAH BioBrain (koreksi OCR lebih presisi)
+                corrected = apply_text_correction(normalized_result['corrected'], lang=doc_language)
+                element['text'] = corrected
+                normalized_result['corrected'] = corrected
 
                 # Detect element language (from AI or auto-detect from text)
                 elem_lang = element.get('lang', '')
@@ -667,7 +684,10 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
                 
                 for element in layout_elements:
                     normalized_result = brain_module.normalize_text(element['text'], lang=supp_lang)
-                    element['text'] = normalized_result['corrected']
+                    # Terapkan text_corrector SETELAH BioBrain
+                    corrected = apply_text_correction(normalized_result['corrected'], lang=supp_lang)
+                    element['text'] = corrected
+                    normalized_result['corrected'] = corrected
                     
                     # Cek missing chapter assignment
                     bab_id, bab_title = "", ""

@@ -66,6 +66,14 @@ except ImportError:
 # Import OpenRouter Smart Client
 from openrouter_client import get_openrouter_client
 
+# Import Text Corrector (OCR post-processor)
+try:
+    from text_corrector import correct_ocr_text
+    TEXT_CORRECTOR_AVAILABLE = True
+except ImportError:
+    TEXT_CORRECTOR_AVAILABLE = False
+    logger.warning("⚠️ text_corrector not available — OCR correction disabled")
+
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -213,7 +221,7 @@ class BioVisionHybrid:
 
                 # Skip tiny regions (likely noise)
                 area = (x2 - x1) * (y2 - y1)
-                if area < 500:
+                if area < 200:
                     continue
 
                 # Normalize PPStructure types to our standard types
@@ -604,6 +612,23 @@ Output ONLY the JSON array, nothing else."""
                     "bbox": bbox,
                     "confidence": 0.95
                 })
+                # ALSO try OCR on table/figure regions — some are actually
+                # highlighted text boxes (gray bg) that PPStructure misclassifies.
+                # If readable text is found, add it as a separate paragraph.
+                try:
+                    text, confidence = self._extract_text(original_img, bbox, lang=lang)
+                    if text.strip() and confidence > 0.55 and len(text.strip()) > 10:
+                        elements.append({
+                            "type": "paragraph",
+                            "text": text,
+                            "bbox": bbox,
+                            "confidence": round(confidence, 2),
+                            "_from_visual_region": True
+                        })
+                        logger.info(f"📖 Also extracted text from {rtype} region: "
+                                    f"'{text[:50]}...' (conf={confidence:.2f})")
+                except Exception:
+                    pass  # Non-fatal: we still have the crop
             else:
                 # Text elements: extract with PaddleOCR
                 text, confidence = self._extract_text(original_img, bbox, lang=lang)
@@ -617,6 +642,139 @@ Output ONLY the JSON array, nothing else."""
 
         logger.info(f"📝 Extracted text from {len(elements)} elements "
                     f"({sum(1 for e in elements if e['type'] in ('table', 'figure'))} visual)")
+
+        # ── STAGE 2.5: Orphan Text Recovery ──────────────────────────
+        # Run full-page PaddleOCR and find text lines that PPStructure missed.
+        # Any text not covered by an existing region is added as a new element.
+        try:
+            logger.info("🔎 Stage 2.5: Orphan text recovery (full-page OCR)...")
+            full_page_result = self.ocr_engine.ocr(original_img, cls=False)
+
+            orphan_count = 0
+            if full_page_result and full_page_result[0]:
+                # Collect bboxes of TEXT elements ONLY.
+                # IMPORTANT: table/figure regions are NOT included because they were
+                # only cropped as images — their text was never OCR'd.
+                # If we included them, text near/inside table crops would be wrongly
+                # considered "covered" and lost forever.
+                existing_bboxes = [
+                    e['bbox'] for e in elements
+                    if e.get('type') not in ('table', 'figure')
+                ]
+
+                for line in full_page_result[0]:
+                    # PaddleOCR returns [[x1,y1],[x2,y2],[x3,y3],[x4,y4]], text, conf
+                    points = line[0]
+                    text   = line[1][0].strip()
+                    conf   = line[1][1]
+
+                    if not text or conf < 0.35 or len(text) < 2:
+                        continue
+
+                    # Convert polygon to axis-aligned bbox
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    lx1, ly1 = int(min(xs)), int(min(ys))
+                    lx2, ly2 = int(max(xs)), int(max(ys))
+
+                    # Skip tiny fragments
+                    if (lx2 - lx1) < 10 or (ly2 - ly1) < 5:
+                        continue
+
+                    # Check overlap with existing regions
+                    is_covered = False
+                    for ex1, ey1, ex2, ey2 in existing_bboxes:
+                        # Compute intersection
+                        ox1 = max(lx1, ex1)
+                        oy1 = max(ly1, ey1)
+                        ox2 = min(lx2, ex2)
+                        oy2 = min(ly2, ey2)
+                        if ox2 > ox1 and oy2 > oy1:
+                            overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                            line_area    = (lx2 - lx1) * (ly2 - ly1) or 1
+                            # If >40% of the orphan line is inside an existing region, skip
+                            if overlap_area / line_area > 0.40:
+                                is_covered = True
+                                break
+
+                    if not is_covered:
+                        elements.append({
+                            "type": "paragraph",
+                            "text": text,
+                            "bbox": [lx1, ly1, lx2, ly2],
+                            "confidence": round(conf, 2),
+                            "_orphan": True   # Tag for debugging
+                        })
+                        # Add this bbox to existing so subsequent orphans don't duplicate
+                        existing_bboxes.append([lx1, ly1, lx2, ly2])
+                        orphan_count += 1
+
+            if orphan_count > 0:
+                logger.info(f"🆕 Recovered {orphan_count} orphan text line(s) missed by PPStructure")
+
+                # ── Merge nearby orphan lines into paragraphs ─────────
+                # PaddleOCR returns line-by-line; merge adjacent orphans
+                # vertically close to each other (same paragraph).
+                orphans = [e for e in elements if e.get('_orphan')]
+                non_orphans = [e for e in elements if not e.get('_orphan')]
+
+                if len(orphans) > 1:
+                    orphans.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
+                    merged = [orphans[0]]
+
+                    for orph in orphans[1:]:
+                        prev = merged[-1]
+                        pb = prev['bbox']   # [x1,y1,x2,y2]
+                        ob = orph['bbox']
+
+                        vertical_gap = ob[1] - pb[3]  # top of new - bottom of prev
+                        x_overlap = min(pb[2], ob[2]) - max(pb[0], ob[0])
+                        min_width = min(pb[2] - pb[0], ob[2] - ob[0]) or 1
+
+                        # Merge if: close vertically (<15px gap) and X overlaps >30%
+                        if 0 <= vertical_gap < 15 and x_overlap / min_width > 0.30:
+                            # Merge text and expand bbox
+                            prev['text'] = prev['text'] + ' ' + orph['text']
+                            prev['bbox'] = [
+                                min(pb[0], ob[0]),
+                                min(pb[1], ob[1]),
+                                max(pb[2], ob[2]),
+                                max(pb[3], ob[3])
+                            ]
+                            prev['confidence'] = round(
+                                (prev['confidence'] + orph['confidence']) / 2, 2
+                            )
+                        else:
+                            merged.append(orph)
+
+                    elements = non_orphans + merged
+                    logger.info(f"📦 Merged {orphan_count} orphan lines → {len(merged)} paragraph(s)")
+
+                # Re-sort all elements top-to-bottom after adding orphans
+                elements.sort(key=lambda e: e['bbox'][1])
+            else:
+                logger.info("✓ No orphan text found — PPStructure covered everything")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Orphan text recovery failed (non-fatal): {e}")
+
+        # ── STAGE 2.6: Text Correction (SymSpell + Context + Entity) ──
+        if TEXT_CORRECTOR_AVAILABLE:
+            try:
+                logger.info(f"✏️ Stage 2.6: OCR text correction (lang={lang})...")
+                corrected_count = 0
+                for elem in elements:
+                    # Only correct text elements (skip tables/figures)
+                    if elem.get('type') not in ('table', 'figure') and elem.get('text'):
+                        original_text = elem['text']
+                        elem['text'] = correct_ocr_text(elem['text'], lang=lang)
+                        if elem['text'] != original_text:
+                            corrected_count += 1
+                logger.info(f"✅ Text correction: {corrected_count}/{len(elements)} element(s) diperbaiki")
+            except Exception as e:
+                logger.warning(f"⚠️ Stage 2.6 text correction failed (non-fatal): {e}")
+        else:
+            logger.info("ℹ️ Text corrector tidak tersedia — melewati Stage 2.6")
 
         # ── STAGE 3: AI Chapter Classification ────────────────────
         ai_enabled = os.getenv("AI_VISION_OCR_ENABLED", "false").lower() in (

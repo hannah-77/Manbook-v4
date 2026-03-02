@@ -123,41 +123,32 @@ class BioBrain:
         cleaned = re.sub(r'([a-z])1([a-z])', r'\1l\2', cleaned)
         
         # --- CONTEXT AWARE CORRECTION (Fuzzy Matching) ---
-        # 7. Check for critical keywords with slight typos
-        
-        # We only auto-correct if it's very close (cutoff=0.85) to avoid false positives
-        # And only for words in our specific dictionary (not general English)
-        words_list = cleaned.split()
-        final_words = []
-        
-        # Build whitelist set for speed
-        try:
-            spell_words = list(self.spell.word_frequency.words())
-        except Exception:
-            spell_words = []
-        vocab_set = set(spell_words + list(self.taxonomy.keys()))
+        # NOTE: Fuzzy matching HANYA untuk bahasa Inggris.
+        # Untuk Indonesia, text_corrector.py menangani koreksi OCR secara lebih presisi.
+        # BioBrain fuzzy matching DINONAKTIFKAN untuk 'id' karena kamus spell checker
+        # (bahasa Inggris) salah mencocokkan kata Indonesia ke kata asing.
+        if lang != 'id':
+            words_list = cleaned.split()
+            final_words = []
+            try:
+                spell_words = list(self.spell.word_frequency.words())
+            except Exception:
+                spell_words = []
+            vocab_set = set(spell_words + list(self.taxonomy.keys()))
 
-
-        for w in words_list:
-            # If word is already correct, keep it
-            if w.lower() in vocab_set or (self.spell and w.lower() in self.spell):
-                final_words.append(w)
-                continue
-            
-            # If not, try to find a close match in our specific medical/manual terms
-            # We DONT use general dictionary for auto-correct to be safe
-            matches = get_close_matches(w.lower(), list(vocab_set), n=1, cutoff=0.85)
-            
-            if matches:
-                # Preserve original casing if possible (simple heuristic)
-                best = matches[0]
-                if w.istitle(): best = best.capitalize()
-                elif w.isupper(): best = best.upper()
-                final_words.append(best)
-            else:
-                final_words.append(w)
-                
-        cleaned = " ".join(final_words)
+            for w in words_list:
+                if w.lower() in vocab_set or (self.spell and w.lower() in self.spell):
+                    final_words.append(w)
+                    continue
+                matches = get_close_matches(w.lower(), list(vocab_set), n=1, cutoff=0.85)
+                if matches:
+                    best = matches[0]
+                    if w.istitle(): best = best.capitalize()
+                    elif w.isupper(): best = best.upper()
+                    final_words.append(best)
+                else:
+                    final_words.append(w)
+            cleaned = " ".join(final_words)
         # --- END CONTEXT AWARE CORRECTION ---
         
         # Preserve cleaned text for next steps
