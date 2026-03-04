@@ -320,45 +320,74 @@ class BioVisionHybrid:
     # ═══════════════════════════════════════════════════════════════
     # PREPROCESSING: Watermark Removal + Denoising (for OCR)
     # ═══════════════════════════════════════════════════════════════
-    def _preprocess_for_ocr(self, crop):
+    def _preprocess_for_ocr(self, crop, region_type: str = 'paragraph'):
         """
         Clean an image crop before OCR:
         1. Remove red/pink watermarks (common in medical device manuals)
-        2. Denoise with bilateral filter (preserves edges/text)
-        3. Enhance contrast for sharper text
+        2. CLAHE contrast enhancement (adaptive — better than flat sharpen)
+        3. Gentle unsharp mask for edge crispness WITHOUT destroying thin strokes
+        4. Deskew: straighten slightly-rotated text (common in scanned docs)
         """
         if crop is None or crop.size == 0:
             return crop
 
         try:
+            h, w = crop.shape[:2]
+
             # 1. Remove red/pink watermarks using HSV color masking
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-
-            # Red range 1: 0–10
-            mask1 = cv2.inRange(hsv, np.array([0, 30, 30]), np.array([10, 255, 255]))
-            # Red range 2: 160–180
+            mask1 = cv2.inRange(hsv, np.array([0,  30,  30]), np.array([10,  255, 255]))
             mask2 = cv2.inRange(hsv, np.array([160, 30, 30]), np.array([180, 255, 255]))
-            # Orange range: 10–25
-            mask3 = cv2.inRange(hsv, np.array([10, 50, 50]), np.array([25, 255, 255]))
-
+            mask3 = cv2.inRange(hsv, np.array([10,  50, 50]), np.array([25,  255, 255]))
             watermark_mask = mask1 + mask2 + mask3
-
-            # Dilate to cover anti-aliased edges
             kernel = np.ones((3, 3), np.uint8)
             watermark_mask = cv2.dilate(watermark_mask, kernel, iterations=2)
-
-            # Replace watermark pixels with white
             clean = crop.copy()
             clean[watermark_mask > 0] = (255, 255, 255)
 
-            # 2. Denoise (preserves text edges)
-            clean = cv2.bilateralFilter(clean, 9, 75, 75)
+            # 2. Denoise (bilateral: preserves edges, removes noise)
+            clean = cv2.bilateralFilter(clean, 7, 50, 50)
 
-            # 3. Sharpen for better character recognition
-            sharpen_kernel = np.array([[-1, -1, -1],
-                                       [-1,  9, -1],
-                                       [-1, -1, -1]])
-            clean = cv2.filter2D(clean, -1, sharpen_kernel)
+            # 3. CLAHE contrast enhancement (adaptive histogram eq. per tile)
+            #    Works much better than flat sharpen for low-contrast / faded text
+            lab = cv2.cvtColor(clean, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            lab = cv2.merge([l, a, b])
+            clean = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+            # 4. Gentle unsharp mask (SAFER than hard sharpen kernel)
+            #    gaussian_blur subtracted from original = sharpened edges only
+            blur = cv2.GaussianBlur(clean, (0, 0), sigmaX=1.5)
+            clean = cv2.addWeighted(clean, 1.5, blur, -0.5, 0)
+
+            # 5. Deskew — straighten slight text rotation (scanned docs)
+            #    Only applied if crop is wide enough to measure skew reliably
+            if w > 80 and h > 20:
+                try:
+                    gray_d = cv2.cvtColor(clean, cv2.COLOR_BGR2GRAY)
+                    _, binary_d = cv2.threshold(
+                        gray_d, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+                    )
+                    coords = np.column_stack(np.where(binary_d > 0))
+                    if len(coords) > 50:
+                        angle = cv2.minAreaRect(coords)[-1]
+                        # minAreaRect returns angle in [-90, 0]
+                        if angle < -45:
+                            angle = 90 + angle
+                        # Only correct small angles (< 5°) to avoid false deskew
+                        if abs(angle) < 5.0 and abs(angle) > 0.3:
+                            M = cv2.getRotationMatrix2D(
+                                (w // 2, h // 2), angle, 1.0
+                            )
+                            clean = cv2.warpAffine(
+                                clean, M, (w, h),
+                                flags=cv2.INTER_CUBIC,
+                                borderMode=cv2.BORDER_REPLICATE
+                            )
+                except Exception:
+                    pass  # Deskew is best-effort
 
             return clean
         except Exception as e:
@@ -378,18 +407,40 @@ class BioVisionHybrid:
                  Fallback to PaddleOCR if Tesseract not installed
           'en' → PaddleOCR ONLY (English model)
 
-        These are two completely separate OCR engines — one per language.
-        The engine used is determined SOLELY by the language the user
-        selected in the UI before uploading.
+        Region is padded slightly on all sides before OCR to catch
+        characters at the very edge of the detected bbox.
         """
         x1, y1, x2, y2 = bbox
-        crop = image_cv[y1:y2, x1:x2]
+        h_img, w_img = image_cv.shape[:2]
+
+        # ── Pad bbox slightly to avoid clipping edge characters ──────
+        pad_x = max(4, int((x2 - x1) * 0.02))   # 2% of region width
+        pad_y = max(4, int((y2 - y1) * 0.05))   # 5% of region height
+        x1p = max(0, x1 - pad_x)
+        y1p = max(0, y1 - pad_y)
+        x2p = min(w_img, x2 + pad_x)
+        y2p = min(h_img, y2 + pad_y)
+
+        crop = image_cv[y1p:y2p, x1p:x2p]
 
         if crop.size == 0:
             return "", 0.0
 
-        # Preprocess: clean watermark + denoise
+        # Preprocess: clean watermark + CLAHE + deskew
         clean_crop = self._preprocess_for_ocr(crop)
+
+        # Determine best Tesseract PSM based on region shape
+        region_h = y2p - y1p
+        region_w = x2p - x1p
+        aspect = region_w / max(region_h, 1)
+        if region_h < 40:               # Single line (very short region)
+            psm = 7
+        elif aspect > 5 and region_h < 80:
+            psm = 7                     # Single short wide line
+        elif aspect > 3:
+            psm = 6                     # Uniform text block (wide paragraph)
+        else:
+            psm = 4                     # Multi-column / mixed layout
 
         # ════════════════════════════════════════════════════
         # INDONESIAN → Tesseract OCR (lang pack 'ind')
@@ -400,7 +451,7 @@ class BioVisionHybrid:
                     rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
                     pil_img = Image.fromarray(rgb)
 
-                    config = '--oem 3 --psm 6'
+                    config = f'--oem 3 --psm {psm}'
                     data = pytesseract.image_to_data(
                         pil_img, lang='ind', config=config,
                         output_type=pytesseract.Output.DICT
@@ -411,23 +462,45 @@ class BioVisionHybrid:
                     for i, txt in enumerate(data['text']):
                         txt = txt.strip()
                         conf = int(data['conf'][i])
-                        if txt and conf > 30:
+                        # Threshold: 25 (balanced — was 30 original, then 20 too low)
+                        if txt and conf > 25:
                             words.append(txt)
                             confidences.append(conf / 100.0)
 
                     if words:
                         avg_conf = sum(confidences) / len(confidences)
                         return ' '.join(words), avg_conf
+
+                    # Tesseract found nothing with PSM N → retry with PSM 11
+                    # (sparse text — finds individual words anywhere)
+                    if psm != 11:
+                        data2 = pytesseract.image_to_data(
+                            pil_img, lang='ind',
+                            config='--oem 3 --psm 11',
+                            output_type=pytesseract.Output.DICT
+                        )
+                        words2, confs2 = [], []
+                        for i, txt in enumerate(data2['text']):
+                            txt = txt.strip()
+                            conf = int(data2['conf'][i])
+                            if txt and conf > 25:
+                                words2.append(txt)
+                                confs2.append(conf / 100.0)
+                        if words2:
+                            avg_conf = sum(confs2) / len(confs2)
+                            logger.debug(f"PSM 11 rescue: found {len(words2)} words")
+                            return ' '.join(words2), avg_conf
+
                     return "", 0.0
 
                 except Exception as e:
                     logger.warning(f"Tesseract (ind) failed: {e}")
-                    # Tesseract failed mid-process — do NOT silently drop, use PaddleOCR
+                    # Fall through to PaddleOCR
 
             else:
                 logger.warning("⚠️ Tesseract not available — using PaddleOCR as fallback for Indonesian")
 
-            # Fallback: PaddleOCR for Indonesian (when Tesseract unavailable or crashed)
+            # Fallback: PaddleOCR for Indonesian
             try:
                 ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
                 if ocr_result and ocr_result[0]:
@@ -435,7 +508,7 @@ class BioVisionHybrid:
                     for line in ocr_result[0]:
                         text = line[1][0]
                         conf = line[1][1]
-                        if conf > 0.4:
+                        if conf > 0.35:   # balanced (was 0.4 original, 0.3 too low)
                             lines.append(text)
                             confidences.append(conf)
                     if lines:
@@ -458,7 +531,7 @@ class BioVisionHybrid:
                     for line in ocr_result[0]:
                         text = line[1][0]
                         conf = line[1][1]
-                        if conf > 0.4:
+                        if conf > 0.35:   # balanced (was 0.4 original, 0.3 too low)
                             lines.append(text)
                             confidences.append(conf)
 
@@ -578,14 +651,38 @@ Output ONLY the JSON array, nothing else."""
 
         h, w = original_img.shape[:2]
 
+        # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
+        # Dokumen yang di-scan dengan resolusi rendah sering menghasilkan
+        # teks blur yang tidak bisa dibaca oleh OCR manapun.
+        # Upscale 2x jika lebar < 1500px (threshold untuk teks 10pt terbaca baik)
+        ocr_img = original_img   # Gambar yang dipakai untuk OCR (bisa berbeda dari preview)
+        ocr_scale = 1.0
+        if w < 1500:
+            scale_factor = min(2.0, 1500 / w)   # max 2x upscale
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            ocr_img = cv2.resize(
+                original_img, (new_w, new_h),
+                interpolation=cv2.INTER_CUBIC   # CUBIC = terbaik untuk teks
+            )
+            ocr_scale = scale_factor
+            logger.info(f"🔍 Auto-upscale: {w}x{h} → {new_w}x{new_h} (scale={scale_factor:.1f}x)")
+        else:
+            logger.info(f"✓ Resolusi OK: {w}x{h} — tidak perlu upscale")
+
         # Save preview (original image for frontend display)
         preview_fname = f"PREVIEW_{filename_base}.jpg"
         preview_path = os.path.join(output_dir, preview_fname)
         cv2.imwrite(preview_path, original_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
         # ── STAGE 1: Layout Detection ─────────────────────────────
-        logger.info("📐 Stage 1: Layout detection (PPStructure)...")
-        regions = self._detect_layout(original_img)
+        logger.info("\ud83d\udcd0 Stage 1: Layout detection (PPStructure)...")
+        regions = self._detect_layout(ocr_img)   # Gunakan ocr_img (sudah upscale jika perlu)
+
+        # Scale-down bbox jika gambar di-upscale agar bbox sesuai original_img
+        if ocr_scale != 1.0:
+            for r in regions:
+                r['bbox'] = [int(v / ocr_scale) for v in r['bbox']]
 
         # Fallback: if PPStructure finds nothing, OCR the full page
         if not regions:
@@ -668,7 +765,8 @@ Output ONLY the JSON array, nothing else."""
                     text   = line[1][0].strip()
                     conf   = line[1][1]
 
-                    if not text or conf < 0.35 or len(text) < 2:
+                    # Threshold: 0.30 — balanced (was 0.35 original, 0.25 too low)
+                    if not text or conf < 0.30 or len(text) < 2:
                         continue
 
                     # Convert polygon to axis-aligned bbox
@@ -731,8 +829,9 @@ Output ONLY the JSON array, nothing else."""
                         x_overlap = min(pb[2], ob[2]) - max(pb[0], ob[0])
                         min_width = min(pb[2] - pb[0], ob[2] - ob[0]) or 1
 
-                        # Merge if: close vertically (<15px gap) and X overlaps >30%
-                        if 0 <= vertical_gap < 15 and x_overlap / min_width > 0.30:
+                        # Merge if: vertically close (<25px, was 15px) AND X overlaps >20%
+                        # The relaxed threshold handles documents with inconsistent line spacing
+                        if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
                             # Merge text and expand bbox
                             prev['text'] = prev['text'] + ' ' + orph['text']
                             prev['bbox'] = [
@@ -757,6 +856,106 @@ Output ONLY the JSON array, nothing else."""
 
         except Exception as e:
             logger.warning(f"⚠️ Orphan text recovery failed (non-fatal): {e}")
+
+        # ── STAGE 2.55: Tesseract Full-Page Pass (Indonesia only) ────────────
+        # Khusus dokumen ID: jalankan Tesseract pada seluruh halaman dengan PSM 3
+        # (auto page segmentation) untuk menangkap teks yang PaddleOCR miss.
+        # Ini sangat efektif untuk: footnote, watermark teks, header/footer,
+        # teks di area yang PPStructure classify salah sebagai figure.
+        if lang == 'id' and TESSERACT_AVAILABLE:
+            try:
+                logger.info("🔎 Stage 2.55: Tesseract full-page Indonesian pass (PSM 3)...")
+                from PIL import Image as PILImage
+
+                # Gunakan ocr_img (sudah upscale) untuk Tesseract juga
+                rgb_full = cv2.cvtColor(ocr_img, cv2.COLOR_BGR2RGB)
+                pil_full = PILImage.fromarray(rgb_full)
+
+                data_full = pytesseract.image_to_data(
+                    pil_full, lang='ind',
+                    config='--oem 3 --psm 3',
+                    output_type=pytesseract.Output.DICT
+                )
+
+                # Collect bboxes dari elemen yang sudah ada (untuk overlap check)
+                existing_bboxes_t = [
+                    e['bbox'] for e in elements
+                    if e.get('type') not in ('table', 'figure')
+                ]
+
+                tess_orphan_count = 0
+                # Kelompokkan per block_num — setiap block = satu area teks Tesseract
+                from itertools import groupby
+                indices = range(len(data_full['text']))
+                block_map = {}
+                for i in indices:
+                    txt  = data_full['text'][i].strip()
+                    conf = int(data_full['conf'][i])
+                    bn   = data_full['block_num'][i]
+                    if not txt or conf < 25:
+                        continue
+                    lx1 = data_full['left'][i]
+                    ly1 = data_full['top'][i]
+                    lx2 = lx1 + data_full['width'][i]
+                    ly2 = ly1 + data_full['height'][i]
+
+                    # Scale bbox kembali ke koordinat original_img
+                    if ocr_scale != 1.0:
+                        lx1 = int(lx1 / ocr_scale)
+                        ly1 = int(ly1 / ocr_scale)
+                        lx2 = int(lx2 / ocr_scale)
+                        ly2 = int(ly2 / ocr_scale)
+
+                    if bn not in block_map:
+                        block_map[bn] = {'texts': [], 'confs': [], 'x1': lx1, 'y1': ly1, 'x2': lx2, 'y2': ly2}
+                    block_map[bn]['texts'].append(txt)
+                    block_map[bn]['confs'].append(conf)
+                    block_map[bn]['x1'] = min(block_map[bn]['x1'], lx1)
+                    block_map[bn]['y1'] = min(block_map[bn]['y1'], ly1)
+                    block_map[bn]['x2'] = max(block_map[bn]['x2'], lx2)
+                    block_map[bn]['y2'] = max(block_map[bn]['y2'], ly2)
+
+                for bn, blk in block_map.items():
+                    text_out = ' '.join(blk['texts'])
+                    if len(text_out.strip()) < 3:
+                        continue
+                    avg_conf = sum(blk['confs']) / len(blk['confs']) / 100.0
+                    bx1, by1, bx2, by2 = blk['x1'], blk['y1'], blk['x2'], blk['y2']
+
+                    # Cek overlap dengan elemen yang sudah ada
+                    is_covered = False
+                    for ex1, ey1, ex2, ey2 in existing_bboxes_t:
+                        ox1 = max(bx1, ex1)
+                        oy1 = max(by1, ey1)
+                        ox2 = min(bx2, ex2)
+                        oy2 = min(by2, ey2)
+                        if ox2 > ox1 and oy2 > oy1:
+                            overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                            blk_area = (bx2 - bx1) * (by2 - by1) or 1
+                            if overlap_area / blk_area > 0.40:
+                                is_covered = True
+                                break
+
+                    if not is_covered:
+                        elements.append({
+                            'type': 'paragraph',
+                            'text': text_out,
+                            'bbox': [bx1, by1, bx2, by2],
+                            'confidence': round(avg_conf, 2),
+                            '_tess_recovery': True
+                        })
+                        existing_bboxes_t.append([bx1, by1, bx2, by2])
+                        tess_orphan_count += 1
+
+                if tess_orphan_count > 0:
+                    logger.info(f"🌟 Tesseract recovery: +{tess_orphan_count} blok teks baru")
+                    # Re-sort setelah penambahan
+                    elements.sort(key=lambda e: e['bbox'][1])
+                else:
+                    logger.info("✓ Tesseract full-page: tidak ada teks tambahan")
+
+            except Exception as e:
+                logger.warning(f"⚠️ Stage 2.55 Tesseract recovery gagal (non-fatal): {e}")
 
         # ── STAGE 2.6: Text Correction (SymSpell + Context + Entity) ──
         if TEXT_CORRECTOR_AVAILABLE:
@@ -847,7 +1046,8 @@ Output ONLY the JSON array, nothing else."""
                 "chapter": elem.get('chapter'),
                 "lang": elem.get('lang'),
                 "crop_url": crop_url,
-                "crop_local": crop_local
+                "crop_local": crop_local,
+                "source_image_local": preview_path
             })
 
         logger.info(f"✅ Hybrid scan complete: {len(final_elements)} elements")

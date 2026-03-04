@@ -54,21 +54,78 @@ ketujuh ke komponen kondisi koneksi konfigurasi kontrol kualitas kurang lain
 langkah lanjut lebih letal level listrik lokasi maka makin manual masa masalah
 mata memasang memasukan memastikan memerlukan memperbaiki menggunakan merawat
 metode minta mode model mudah mulai nama nasional nilai nomor normal oleh
-omset operasi orde panduan panjang paragaraf pemasangan pemeliharaan pemakaian
+omset operasi orde panduan panjang paragraf pemasangan pemeliharaan pemakaian
 pembuatan penarikan penggunaan pengerjaan perangkat perawatan peringatan perlu
 pertama petunjuk pilih posisi produk program prosedur rangkaian rasio rata
 rekomendasi rusak saat sama sarana sebab sebelum seharusnya selesai serta
 siap sistem sisi standar status suhu sumber tabel tahap tekanan teknis terdiri
-terkait tidak tindakan tinggi tipe tidak uji unit untuk urutan pada penggunaan
-voltase warna yang yaitu berikan biasa boleh butuh cara cegah dampak daya
-depan deskripsi deteksi digital dimensi fungsi hitung informasi instruksi
-kategori keamanan kebijakan kecil keluar kemudian komponen koneksi langkah
-mata matikan mesin nilai normal nyata pahami penting pilih prosedur rangkaian
-risiko setting sinyal sistem spesifikasi suhu tekanan teknis timer tombol
+terkait tidak tindakan tinggi tipe uji unit untuk urutan pada
+voltase warna yang yaitu berikan biasa boleh butuh cegah dampak daya
+deskripsi deteksi digital dimensi hitung instruksi
+kategori keamanan kebijakan kecil keluar kemudian
+nyata pahami penting
+risiko setting sinyal spesifikasi timer tombol
 troubleshoot ukuran versi waktu warning
 label garansi berlaku sedang gratis material penghapusan penggantian expedisi
-ketika menjamin batas cacat kecelakaan perbaikan siapapun diizinkan
-alarm diperbaiki kebijakannya terdiri menyediakan pengganti dipastikan
+ketika menjamin cacat kecelakaan perbaikan siapapun diizinkan
+alarm diperbaiki kebijakannya menyediakan pengganti dipastikan
+pastikan lakukan jalankan hubungkan sambungkan lepaskan tekan putar geser tarik
+dorong bersihkan keringkan simpan tutup pasang copot cabut nyalakan hidupkan
+matikan padamkan periksa cermati amati perhatikan catat tulis bacakan jelaskan
+sampaikan kirim terima ambil letakkan tempatkan arahkan sesuaikan kendalikan
+operasikan aktifkan nonaktifkan reset mulai hentikan lanjutkan ulangi
+selesaikan lengkapi verifikasi validasi konfirmasi tandai hapus ubah salin
+pindahkan angkat turunkan naikkan kurangi tambahkan masukkan keluarkan
+badan benda body frame rangka casing housing penutup tutup pelindung
+konektor terminal pin soket colokan adaptor charger pengisi daya baterai
+sensor probe detektor indikator lampu display layar panel saklar switch
+relay fuse sekering trafo transformator motor pompa fan kipas valve katup
+pipa selang filter saringan gasket seal bearing bantalan gear roda gigi
+poros shaft belt sabuk rantai chain spring pegas baut mur ring washer
+sekrup obeng kunci tang palu sikat lap kain sarung tangan masker kacamata
+pelumas oli grease minyak cairan fluida coolant pendingin refrigerant
+tegangan arus daya watt ampere volt ohm frekuensi hertz resistansi impedansi
+kapasitas volume tekanan suhu temperatur kelembaban kecepatan putaran torsi
+getaran vibration noise kebisingan emisi radiasi kebocoran korosi karat aus
+keausan retak patah pecah bengkok melengkung deformasi
+kalibrasi pengujian inspeksi audit pemeriksaan evaluasi penilaian pengukuran
+penggantian penyesuaian perbaikan overhaul rekondisi modifikasi upgrade
+jadwal interval periodik rutin harian mingguan bulanan tahunan berkala
+garansi warranty jaminan klaim retur pengembalian
+bahaya berbahaya beracun korosif mudah terbakar meledak
+wajib dilarang jangan hindari perhatian awas hati peringatan
+dengan tanpa menggunakan melalui setelah sebelum selama saat ketika apabila
+bila karena sebab akibat agar supaya sehingga meskipun walaupun namun tetapi
+akan sedang telah sudah belum pernah selalu sering jarang kadang
+semua setiap masing tiap beberapa salah satu lain lainnya tersebut
+sangat cukup agak kurang lebih paling terlalu sesuai tepat benar salah
+baru lama besar kecil panjang pendek lebar sempit tebal tipis
+tinggi rendah berat ringan keras lunak kasar halus basah kering
+panas dingin hangat sejuk
+atas bawah kiri kanan depan belakang samping tengah dalam luar
+pertama kedua ketiga keempat kelima keenam ketujuh kedelapan kesembilan kesepuluh
+satu dua tiga empat lima enam tujuh delapan sembilan sepuluh
+seratus ribu juta miliar persen derajat meter sentimeter milimeter
+kilogram gram liter mililiter detik menit jam hari minggu bulan tahun
+secara melalui terhadap antara seperti berikut sebagai mengenai menurut
+dibersihkan dibuka ditutup dipasang dilepas dimatikan dihidupkan
+diperiksa diperbaiki diganti digunakan diisi dikosongkan diputar
+ditekan ditarik didorong diangkat diturunkan diatur disesuaikan
+membersihkan membuka menutup memasang melepas mematikan menghidupkan
+memeriksa memperbaiki mengganti mengisi mengosongkan memutar
+menekan menarik mendorong mengangkat menurunkan mengatur menyesuaikan
+terhubung terputus terpasang terlepas terisi terkunci terbuka tertutup
+terdeteksi terbaca tercetak terjadi terdapat tersedia tersambung
+pemasangan pelepasan pembersihan pengisian pengosongan pemutaran
+penekanan penarikan pendorongan pengangkatan penurunan pengaturan
+penyesuaian pengecekan penggantian penggunaan perbaikan pemeriksaan
+merupakan memiliki memberikan melakukan menunjukkan menjelaskan
+memastikan menyebabkan membutuhkan menghasilkan memungkinkan
+dilakukan dilengkapi direkomendasikan diperlukan dibutuhkan diharapkan
+terdiri terbuat terletak termasuk terkena terkait tergantung
+pembacaan pencatatan penyimpanan pengiriman penerimaan pemuatan
+kerusakan kebocoran keretakan keausan keamanan keselamatan kegagalan
+berbagai bersama berdasarkan bertujuan berlangsung beroperasi bergerak
 """
 
 
@@ -309,6 +366,25 @@ _CONTEXT_RULES = [
         "triggers": ["memperbaiki", "mengganti", "bagian", "cara", "perbaikan"],
         "lang": "id",
     },
+    # ── "bahan" vs "badan" — OCR sering salah baca 'd' → 'h' ──────
+    # Konteks ORGANISASI/LEMBAGA → "bahan" yang benar adalah "badan"
+    {
+        "target": "bahan",
+        "correct": "badan",
+        "triggers": ["usaha", "hukum", "pengurus", "penanggung", "jawab",
+                     "pengelola", "produsen", "manajemen", "organisasi",
+                     "lembaga", "instansi", "pemerintah", "resmi", "bayi"],
+        "lang": "id",
+    },
+    # Konteks BAHAN KIMIA/MATERIAL → "badan" yang salah baca harusnya tetap "bahan"
+    {
+        "target": "badan",
+        "correct": "bahan",
+        "triggers": ["kimia", "berbahaya", "bakar", "baku", "campuran",
+                     "cairan", "padat", "cair", "reaktif", "toksik",
+                     "material", "kandungan", "komposisi"],
+        "lang": "id",
+    },
     # English
     {
         "target": "installation",
@@ -359,8 +435,9 @@ _ENTITY_MAP_ID = {
     "STINKO"      : "SINKO",
     "PRIMAL"      : "PRIMA",
     "TECHNOVISON" : "TECHNOVISION",
-    "Elteeh"      : "Elitech",      # 'Elteeh' → 'Elitech'
-    "ELTEEH"      : "ELITECH",      # uppercase variant
+    "Elteeh"      : "Elitech",      
+    "ELTEEH"      : "ELITECH",
+    "Eltechf"     : "Elitech",      
 
     # ── Kata OCR yang SELALU salah (tidak ambigu) ─────────────────
     # Koreksi kata-kata ini aman dilakukan tanpa melihat konteks
@@ -375,6 +452,10 @@ _ENTITY_MAP_ID = {
     "digunaan"   : "digunakan",
     "kerusaan"   : "kerusakan",
     "pemasan"    : "pemasangan",
+    # ⚠️ JANGAN tambahkan kata-kata valid bahasa Indonesia di sini!
+    # Entity map hanya untuk kata yang PASTI merupakan OCR error (tidak pernah valid)
+    # Contoh SALAH: "bahan"→"badan" (bahan = kata valid), "gunakan"→"digunakan" (gramatikal valid)
+    "angepakan"  : "pengepakan",
     # ── Baru: temuan dari sampel teks nyata ───────────────────────
     "tau"        : "atau",      # sangat umum: 'tau' → 'atau'
     "karen"      : "karena",    # 'karen' → 'karena'
@@ -415,56 +496,119 @@ def _stage_c_entities(text: str, lang: str = "id") -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
+# STAGE A variant: SymSpell with highlight tracking
+# ─────────────────────────────────────────────────────────────────
+
+def _stage_a_symspell_with_tracking(text: str, lang: str = "id") -> tuple:
+    """
+    Sama seperti _stage_a_symspell, tapi JUGA menghasilkan daftar kata yang:
+      - Tidak ditemukan di kamus (tidak bisa dikoreksi otomatis), ATAU
+      - Ditemukan tapi edit distance-nya tinggi (>= 2, artinya kurang yakin)
+    
+    Returns:
+        (corrected_text: str, highlights: list[dict])
+        
+        Setiap highlight: {
+            "word"       : kata asli (sebelum koreksi),
+            "corrected"  : kata hasil koreksi otomatis (bisa sama),
+            "start"      : posisi karakter mulai di corrected_text,
+            "end"        : posisi karakter selesai di corrected_text,
+            "suggestions": [...] daftar saran alternatif (maks 5),
+            "edit_distance": int,
+            "confidence" : float (0.0–1.0, makin rendah makin tidak yakin)
+        }
+    """
+    try:
+        from symspellpy import Verbosity
+    except ImportError:
+        return text, []
+
+    ss = _get_symspell(lang)
+    if ss is None:
+        return text, []
+
+    words    = text.split()
+    corrected_tokens = []
+    highlights = []
+    char_offset = 0
+
+    for word in words:
+        # Pisahkan punctuation
+        prefix = re.match(r"^([^\w]*)", word).group(1)
+        suffix = re.search(r"([^\w]*)$", word).group(1)
+        core   = word[len(prefix):len(word) - len(suffix)] if suffix else word[len(prefix):]
+
+        if not core or not core.isalpha() or len(core) < 3:
+            corrected_tokens.append(word)
+            char_offset += len(word) + 1  # +1 for space
+            continue
+
+        # Lookup with ALL suggestions (up to 5) so we can offer alternatives
+        suggestions = ss.lookup(core.lower(), Verbosity.ALL, max_edit_distance=2)
+
+        if suggestions:
+            best      = suggestions[0]
+            best_term = best.term
+            best_dist = best.distance
+
+            # Pertahankan kapitalisasi asli
+            if core.isupper():
+                best_term = best_term.upper()
+            elif core[0].isupper():
+                best_term = best_term.capitalize()
+
+            token_out = prefix + best_term + suffix
+            corrected_tokens.append(token_out)
+
+            # Tandai sebagai "tidak yakin" jika edit-distance tinggi (>= 2)
+            if best_dist >= 2:
+                word_start = char_offset + len(prefix)
+                word_end   = word_start + len(best_term)
+                sugg_list  = [
+                    s.term for s in suggestions[:5]
+                    if s.term != best_term.lower()
+                ]
+                # confidence makin rendah jika edit-distance makin tinggi
+                conf = max(0.1, 1.0 - (best_dist * 0.4))
+                highlights.append({
+                    "word"         : core,
+                    "corrected"    : best_term,
+                    "start"        : word_start,
+                    "end"          : word_end,
+                    "suggestions"  : sugg_list[:4],  # max 4 alternatif
+                    "edit_distance": best_dist,
+                    "confidence"   : round(conf, 2),
+                })
+        else:
+            # Kata tidak ada di kamus sama sekali — paling tidak yakin
+            corrected_tokens.append(word)
+            word_start = char_offset + len(prefix)
+            word_end   = word_start + len(core)
+            highlights.append({
+                "word"         : core,
+                "corrected"    : core,   # tidak diubah
+                "start"        : word_start,
+                "end"          : word_end,
+                "suggestions"  : [],
+                "edit_distance": 99,
+                "confidence"   : 0.0,
+            })
+
+        char_offset += len(token_out if suggestions else word) + 1
+
+    corrected_text = " ".join(corrected_tokens)
+    return corrected_text, highlights
+
+
+# ─────────────────────────────────────────────────────────────────
 # MAIN PUBLIC FUNCTION
 # ─────────────────────────────────────────────────────────────────
 
 def correct_ocr_text(text: str, lang: str = "id") -> str:
     """
-    Jalankan pipeline koreksi 3-stage pada teks hasil OCR.
-
-    Pipeline:
-      A → SymSpell typo correction (per kata)
-      B → Context-based correction (window 5)
-      C → Entity / brand standardisation
-
-    Args:
-        text : Teks mentah hasil OCR.
-        lang : 'id' (Indonesia) atau 'en' (English).
-
-    Returns:
-        Teks yang sudah dikoreksi.
+    DISABLED — SymSpell auto-correction was changing words incorrectly
+    (e.g. PRIMA → TERIMA). Returns text unchanged.
     """
-    if not text or not text.strip():
-        return text
-
-    original = text
-
-    # Pipeline urutan PENTING:
-    # C dulu (entity map paling presisi, regex exact-match)
-    # A kemudian (SymSpell — ubah sisa typo yang tidak ada di entity map)
-    # B terakhir (context rules — butuh teks yang sudah lebih bersih)
-
-    try:
-        # Stage C: Entity map — PERTAMA (sebelum SymSpell mengubah kata)
-        text = _stage_c_entities(text, lang=lang)
-    except Exception as e:
-        logger.warning(f"[TextCorrector] Stage C (Entity) failed: {e}")
-
-    try:
-        # Stage A: SymSpell
-        text = _stage_a_symspell(text, lang=lang)
-    except Exception as e:
-        logger.warning(f"[TextCorrector] Stage A (SymSpell) failed: {e}")
-
-    try:
-        # Stage B: Context rules
-        text = _stage_b_context(text, lang=lang)
-    except Exception as e:
-        logger.warning(f"[TextCorrector] Stage B (Context) failed: {e}")
-
-    if text != original:
-        logger.debug(f"[TextCorrector] Corrected: '{original[:60]}' → '{text[:60]}'")
-
     return text
 
 
@@ -500,3 +644,12 @@ def add_entity_mapping(wrong: str, right: str, lang: str = "id"):
     entity_map = _ENTITY_MAP_ID if lang == "id" else _ENTITY_MAP_EN
     entity_map[wrong] = right
     logger.info(f"[TextCorrector] Entity mapping baru: '{wrong}' → '{right}' ({lang})")
+
+
+def correct_ocr_text_with_highlights(text: str, lang: str = "id") -> dict:
+    """
+    DISABLED — SymSpell auto-correction was interfering with OCR results.
+    Returns text unchanged with no highlights.
+    """
+    return {"text": text, "highlights": []}
+

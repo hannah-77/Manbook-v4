@@ -26,6 +26,8 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import cv2
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -45,18 +47,30 @@ except Exception as e:
     logging.warning(f"Vision Engine not available: {e}")
 
 try:
-    from text_corrector import correct_ocr_text as _ocr_correct
+    from text_corrector import (
+        correct_ocr_text as _ocr_correct,
+        correct_ocr_text_with_highlights as _ocr_correct_hl,
+    )
     TEXT_CORRECTOR_AVAILABLE = True
-    logging.info("✓ TextCorrector loaded")
+    logging.info("✓ TextCorrector loaded (with highlights support)")
 except Exception as e:
     TEXT_CORRECTOR_AVAILABLE = False
     logging.warning(f"TextCorrector not available: {e}")
 
 def apply_text_correction(text: str, lang: str = 'id') -> str:
-    """Terapkan koreksi OCR jika text_corrector tersedia."""
+    """Terapkan koreksi OCR jika text_corrector tersedia (tanpa highlights)."""
     if TEXT_CORRECTOR_AVAILABLE and text and text.strip():
         return _ocr_correct(text, lang=lang)
     return text
+
+def apply_text_correction_with_highlights(text: str, lang: str = 'id') -> dict:
+    """
+    Terapkan koreksi OCR dan kembalikan juga highlights kata meragukan.
+    Returns: { 'text': str, 'highlights': list }
+    """
+    if TEXT_CORRECTOR_AVAILABLE and text and text.strip():
+        return _ocr_correct_hl(text, lang=lang)
+    return {'text': text, 'highlights': []}
 
 # ==========================================
 # CONFIGURATION
@@ -145,6 +159,76 @@ def convert_pdf_to_images_safe(path):
 @app.get("/health")
 def health():
     return {"status": "BioManual System Online"}
+
+class GenerateReportRequest(BaseModel):
+    items: list[dict]
+    filename: str
+    lang: str = "id"
+
+@app.post("/generate_custom_report")
+async def generate_custom_report(req: GenerateReportRequest):
+    try:
+        # Panggil BioArchitect dengan data "items" baru yang sudah di-edit pengguna
+        result = architect_module.build_report(req.items, req.filename, lang=req.lang)
+        word_filename = result.get('word_file')
+        
+        if word_filename:
+            word_url = f"http://127.0.0.1:8000/files/{word_filename}"
+            docx_path = os.path.join(architect_module.base_path, word_filename)
+            return {"success": True, "word_url": word_url, "local_path": docx_path}
+        else:
+            return {"success": False, "error": "Report build failed or file not found"}
+    except Exception as e:
+        import traceback
+        logging.error(f"Error in /generate_custom_report: {e}\n{traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
+
+class RecropRequest(BaseModel):
+    source_image_local: str
+    bbox: list[int]
+    element_type: str
+
+@app.post("/recrop")
+async def recrop_image(req: RecropRequest):
+    try:
+        if not os.path.exists(req.source_image_local):
+            return {"success": False, "error": "Source image not found on server"}
+            
+        img = cv2.imread(req.source_image_local)
+        if img is None:
+            return {"success": False, "error": "Failed to load source image"}
+            
+        x1, y1, x2, y2 = req.bbox
+        h, w = img.shape[:2]
+        
+        # Validasi batas gambar
+        x1, y1 = max(0, int(x1)), max(0, int(y1))
+        x2, y2 = min(w, int(x2)), min(h, int(y2))
+        
+        if x2 <= x1 or y2 <= y1:
+            return {"success": False, "error": "Invalid bbox dimensions"}
+            
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            return {"success": False, "error": "Empty crop area"}
+            
+        crop_fname = f"recrop_{req.element_type}_{uuid.uuid4().hex[:6]}.png"
+        crop_path = os.path.join(OUTPUT_DIR, crop_fname)
+        cv2.imwrite(crop_path, crop)
+        
+        from urllib.parse import quote
+        crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+        
+        logger.info(f"✂️ Re-cropped {req.element_type} to: {req.bbox}")
+        
+        return {
+            "success": True,
+            "crop_url": crop_url,
+            "crop_local": crop_path
+        }
+    except Exception as e:
+        logger.error(f"Recrop error: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.post("/start")
 async def start_session():
@@ -491,8 +575,12 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             # B. THE BRAIN (Classify + Normalize)
             for element in layout_elements:
                 normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
-                # Terapkan text_corrector SETELAH BioBrain (koreksi OCR lebih presisi)
-                corrected = apply_text_correction(normalized_result['corrected'], lang=doc_language)
+                # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
+                correction_result = apply_text_correction_with_highlights(
+                    normalized_result['corrected'], lang=doc_language
+                )
+                corrected  = correction_result['text']
+                highlights = correction_result['highlights']
                 element['text'] = corrected
                 normalized_result['corrected'] = corrected
 
@@ -528,21 +616,26 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                         bab_title = chapter_titles[new_key]
 
                 structured_data.append({
-                    "chapter_id": bab_id,
-                    "chapter_title": bab_title,
-                    "type": element['type'],
-                    "original": normalized_result['original'],
-                    "normalized": normalized_result['corrected'],
-                    "typos": normalized_result['typos'],
-                    "has_typo": normalized_result['has_typo'],
+                    "chapter_id"    : bab_id,
+                    "chapter_title" : bab_title,
+                    "type"          : element['type'],
+                    "original"      : normalized_result['original'],
+                    "normalized"    : normalized_result['corrected'],
+                    "typos"         : normalized_result['typos'],
+                    "has_typo"      : normalized_result['has_typo'],
                     "text_confidence": element.get('confidence', 1.0),
-                    "match_score": 100,
-                    "lang": elem_lang,
-                    "crop_url": element.get('crop_url'),
-                    "crop_local": element.get('crop_local')
+                    "match_score"   : 100,
+                    "lang"          : elem_lang,
+                    "crop_url"      : element.get('crop_url'),
+                    "crop_local"    : element.get('crop_local'),
+                    "source_image_local": element.get('source_image_local'),
+                    "bbox"          : element.get('bbox'),
+                    "highlights"    : highlights,   # ← NEW: kata meragukan
                 })
 
             # Cleanup temp page image
+            # We skip this if we need it, but actually the vision_engine saves a PREVIEW image.
+            # So deleting the temp PNG page_path is fine.
             if not isinstance(img_src, str):
                 for attempt in range(3):
                     try:
@@ -684,8 +777,12 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
                 
                 for element in layout_elements:
                     normalized_result = brain_module.normalize_text(element['text'], lang=supp_lang)
-                    # Terapkan text_corrector SETELAH BioBrain
-                    corrected = apply_text_correction(normalized_result['corrected'], lang=supp_lang)
+                    # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
+                    correction_result = apply_text_correction_with_highlights(
+                        normalized_result['corrected'], lang=supp_lang
+                    )
+                    corrected  = correction_result['text']
+                    highlights = correction_result['highlights']
                     element['text'] = corrected
                     normalized_result['corrected'] = corrected
                     
@@ -706,17 +803,20 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
                         bab_id, bab_title = brain_module.semantic_mapping(element)
                     
                     supplementary_data.append({
-                        "chapter_id": bab_id,
-                        "chapter_title": bab_title,
-                        "type": element['type'],
-                        "original": normalized_result['original'],
-                        "normalized": normalized_result['corrected'],
-                        "typos": normalized_result['typos'],
-                        "has_typo": normalized_result['has_typo'],
+                        "chapter_id"    : bab_id,
+                        "chapter_title" : bab_title,
+                        "type"          : element['type'],
+                        "original"      : normalized_result['original'],
+                        "normalized"    : normalized_result['corrected'],
+                        "typos"         : normalized_result['typos'],
+                        "has_typo"      : normalized_result['has_typo'],
                         "text_confidence": element.get('confidence', 1.0),
-                        "match_score": 100,
-                        "crop_url": element.get('crop_url'),
-                        "crop_local": element.get('crop_local')
+                        "match_score"   : 100,
+                        "crop_url"      : element.get('crop_url'),
+                        "crop_local"    : element.get('crop_local'),
+                        "source_image_local": element.get('source_image_local'),
+                        "bbox"          : element.get('bbox'),
+                        "highlights"    : highlights,
                     })
                 
                 # Cleanup

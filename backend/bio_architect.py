@@ -116,7 +116,7 @@ class BioArchitect:
         # ── Heading 3 (Sub-sub-judul / 1.1.1) ───────────────────────
         h3 = doc.styles['Heading 3']
         h3.font.name = 'Arial'
-        h3.font.size = Pt(11)
+        h3.font.size = Pt(12)
         h3.font.bold = True
         h3.font.italic = True
         h3.font.color.rgb = self.COLOR_SECONDARY
@@ -128,7 +128,7 @@ class BioArchitect:
         # ── Heading 4 (Level 4+, misal 1.1.1.1) ─────────────────────
         h4 = doc.styles['Heading 4']
         h4.font.name = 'Arial'
-        h4.font.size = Pt(11)
+        h4.font.size = Pt(12)
         h4.font.bold = False
         h4.font.italic = True
         h4.font.color.rgb = self.COLOR_GRAY
@@ -288,7 +288,7 @@ class BioArchitect:
         p_name.paragraph_format.first_line_indent = Pt(0)
         rn = p_name.add_run(product_name.upper())
         rn.font.name  = 'Arial'
-        rn.font.size  = Pt(18)
+        rn.font.size  = Pt(50)
         rn.font.bold  = True
         rn.font.color.rgb = self.COLOR_BLACK
 
@@ -301,12 +301,12 @@ class BioArchitect:
             p_code.paragraph_format.first_line_indent = Pt(0)
             rc = p_code.add_run(product_code)
             rc.font.name  = 'Arial'
-            rc.font.size  = Pt(16)
+            rc.font.size  = Pt(45)
             rc.font.bold  = True
             rc.font.color.rgb = self.COLOR_BLACK
 
-        # ── Spasi besar di tengah ────────────────────────────
-        for _ in range(10):
+        # ── Spasi besar di tengah ke bawah ────────────────────────────
+        for _ in range(25):  # lebih banyak spasi agar teks turun lebih rendah
             sp = doc.add_paragraph()
             sp.paragraph_format.first_line_indent = Pt(0)
             sp.paragraph_format.space_before = Pt(0)
@@ -314,18 +314,22 @@ class BioArchitect:
 
         # ── Tengah: BUKU MANUAL ──────────────────────────────
         p_bm = doc.add_paragraph()
-        p_bm.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p_bm.paragraph_format.space_before = Pt(0)
-        p_bm.paragraph_format.space_after  = Pt(0)
+        p_bm.alignment = WD_ALIGN_PARAGRAPH.RIGHT  # tetap RIGHT
+        # Tambahkan spasi besar di atas untuk menurunkan judul ke bagian bawah halaman
+        p_bm.paragraph_format.space_before = Pt(300)
+        p_bm.paragraph_format.space_after = Pt(0)
         p_bm.paragraph_format.first_line_indent = Pt(0)
+        # Tingkatkan jarak kanan agar tidak menempel ke tepi
+        p_bm.paragraph_format.right_indent = Pt(60)
+        
         rbm = p_bm.add_run("MANUAL BOOK" if lang == 'en' else "BUKU MANUAL")
         rbm.font.name  = 'Arial'
-        rbm.font.size  = Pt(28)
+        rbm.font.size  = Pt(50)
         rbm.font.bold  = True
         rbm.font.color.rgb = self.COLOR_BLACK
 
-        # ── Spasi menuju bawah ──────────────────────────────
-        for _ in range(10):
+        # ── Spasi menuju bawah (sisa ruang) ──────────────────────────────
+        for _ in range(5):  # UBAH INI: kurangi menjadi 5 karena sudah dipakai di atas
             sp = doc.add_paragraph()
             sp.paragraph_format.first_line_indent = Pt(0)
             sp.paragraph_format.space_before = Pt(0)
