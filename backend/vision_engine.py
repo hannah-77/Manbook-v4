@@ -462,7 +462,7 @@ class BioVisionHybrid:
                     for i, txt in enumerate(data['text']):
                         txt = txt.strip()
                         conf = int(data['conf'][i])
-                        # Threshold: 25 (balanced — was 30 original, then 20 too low)
+                        # Threshold: 25 (balanced)
                         if txt and conf > 25:
                             words.append(txt)
                             confidences.append(conf / 100.0)
@@ -508,7 +508,7 @@ class BioVisionHybrid:
                     for line in ocr_result[0]:
                         text = line[1][0]
                         conf = line[1][1]
-                        if conf > 0.35:   # balanced (was 0.4 original, 0.3 too low)
+                        if conf > 0.35:   # balanced threshold
                             lines.append(text)
                             confidences.append(conf)
                     if lines:
@@ -531,7 +531,7 @@ class BioVisionHybrid:
                     for line in ocr_result[0]:
                         text = line[1][0]
                         conf = line[1][1]
-                        if conf > 0.35:   # balanced (was 0.4 original, 0.3 too low)
+                        if conf > 0.35:   # balanced threshold
                             lines.append(text)
                             confidences.append(conf)
 
@@ -692,80 +692,45 @@ Output ONLY the JSON array, nothing else."""
         # NOTE: Visual-box heuristic is applied inside _detect_layout()
 
 
-        # ── STAGE 2: Text Extraction ────────────────────────────────────
-        ocr_engine_name = "Tesseract (ind)" if (lang == 'id' and TESSERACT_AVAILABLE) else "PaddleOCR (en)"
-        logger.info(f"📝 Stage 2: Text extraction [{ocr_engine_name}] for {len(regions)} regions...")
+        # ── STAGE 2: Split — tables/figures from PPStructure, text from full-page OCR ──
+        # PPStructure is good at detecting tables & figures but unreliable for text regions.
+        # So we only use PPStructure for table/figure bboxes, and run PaddleOCR on the
+        # full page to capture ALL text lines, then filter out those inside table/figure areas.
+        logger.info(f"📝 Stage 2: Extracting tables/figures from PPStructure + full-page OCR for text...")
         elements = []
 
+        # ── 2A: Collect table/figure regions from PPStructure ──
+        visual_bboxes = []  # bboxes of table/figure regions (to exclude from text)
         for region in regions:
             rtype = region['type']
             bbox = region['bbox']
 
             if rtype in ('table', 'figure'):
-                # Visual elements: keep as-is, will be cropped in Stage 4
                 elements.append({
                     "type": rtype,
                     "text": f"[{rtype.upper()}]",
                     "bbox": bbox,
                     "confidence": 0.95
                 })
-                # ALSO try OCR on table/figure regions — some are actually
-                # highlighted text boxes (gray bg) that PPStructure misclassifies.
-                # If readable text is found, add it as a separate paragraph.
-                try:
-                    text, confidence = self._extract_text(original_img, bbox, lang=lang)
-                    if text.strip() and confidence > 0.55 and len(text.strip()) > 10:
-                        elements.append({
-                            "type": "paragraph",
-                            "text": text,
-                            "bbox": bbox,
-                            "confidence": round(confidence, 2),
-                            "_from_visual_region": True
-                        })
-                        logger.info(f"📖 Also extracted text from {rtype} region: "
-                                    f"'{text[:50]}...' (conf={confidence:.2f})")
-                except Exception:
-                    pass  # Non-fatal: we still have the crop
-            else:
-                # Text elements: extract with PaddleOCR
-                text, confidence = self._extract_text(original_img, bbox, lang=lang)
-                if text.strip():
-                    elements.append({
-                        "type": rtype,
-                        "text": text,
-                        "bbox": bbox,
-                        "confidence": round(confidence, 2)
-                    })
+                visual_bboxes.append(bbox)
+                logger.info(f"📦 PPStructure {rtype}: bbox={bbox}")
 
-        logger.info(f"📝 Extracted text from {len(elements)} elements "
-                    f"({sum(1 for e in elements if e['type'] in ('table', 'figure'))} visual)")
+        logger.info(f"📐 Found {len(visual_bboxes)} table/figure regions from PPStructure")
 
-        # ── STAGE 2.5: Orphan Text Recovery ──────────────────────────
-        # Run full-page PaddleOCR and find text lines that PPStructure missed.
-        # Any text not covered by an existing region is added as a new element.
+        # ── 2B: Full-page OCR for ALL text ──
+        # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
+        text_line_count = 0
         try:
-            logger.info("🔎 Stage 2.5: Orphan text recovery (full-page OCR)...")
             full_page_result = self.ocr_engine.ocr(original_img, cls=False)
 
-            orphan_count = 0
             if full_page_result and full_page_result[0]:
-                # Collect bboxes of TEXT elements ONLY.
-                # IMPORTANT: table/figure regions are NOT included because they were
-                # only cropped as images — their text was never OCR'd.
-                # If we included them, text near/inside table crops would be wrongly
-                # considered "covered" and lost forever.
-                existing_bboxes = [
-                    e['bbox'] for e in elements
-                    if e.get('type') not in ('table', 'figure')
-                ]
-
+                # Collect all text lines with their positions
+                raw_lines = []
                 for line in full_page_result[0]:
-                    # PaddleOCR returns [[x1,y1],[x2,y2],[x3,y3],[x4,y4]], text, conf
                     points = line[0]
                     text   = line[1][0].strip()
                     conf   = line[1][1]
 
-                    # Threshold: 0.30 — balanced (was 0.35 original, 0.25 too low)
                     if not text or conf < 0.30 or len(text) < 2:
                         continue
 
@@ -779,83 +744,96 @@ Output ONLY the JSON array, nothing else."""
                     if (lx2 - lx1) < 10 or (ly2 - ly1) < 5:
                         continue
 
-                    # Check overlap with existing regions
-                    is_covered = False
-                    for ex1, ey1, ex2, ey2 in existing_bboxes:
-                        # Compute intersection
-                        ox1 = max(lx1, ex1)
-                        oy1 = max(ly1, ey1)
-                        ox2 = min(lx2, ex2)
-                        oy2 = min(ly2, ey2)
+                    # Check if this text line is INSIDE a table/figure region
+                    is_inside_visual = False
+                    for vx1, vy1, vx2, vy2 in visual_bboxes:
+                        # Compute overlap
+                        ox1 = max(lx1, vx1)
+                        oy1 = max(ly1, vy1)
+                        ox2 = min(lx2, vx2)
+                        oy2 = min(ly2, vy2)
                         if ox2 > ox1 and oy2 > oy1:
                             overlap_area = (ox2 - ox1) * (oy2 - oy1)
-                            line_area    = (lx2 - lx1) * (ly2 - ly1) or 1
-                            # If >40% of the orphan line is inside an existing region, skip
+                            line_area = (lx2 - lx1) * (ly2 - ly1) or 1
                             if overlap_area / line_area > 0.40:
-                                is_covered = True
+                                is_inside_visual = True
                                 break
 
-                    if not is_covered:
-                        elements.append({
-                            "type": "paragraph",
+                    if not is_inside_visual:
+                        raw_lines.append({
                             "text": text,
                             "bbox": [lx1, ly1, lx2, ly2],
                             "confidence": round(conf, 2),
-                            "_orphan": True   # Tag for debugging
                         })
-                        # Add this bbox to existing so subsequent orphans don't duplicate
-                        existing_bboxes.append([lx1, ly1, lx2, ly2])
-                        orphan_count += 1
 
-            if orphan_count > 0:
-                logger.info(f"🆕 Recovered {orphan_count} orphan text line(s) missed by PPStructure")
+                # ── Merge adjacent text lines into paragraphs ──
+                # PaddleOCR returns line-by-line; merge vertically close lines
+                if raw_lines:
+                    raw_lines.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
+                    merged = [dict(raw_lines[0])]
 
-                # ── Merge nearby orphan lines into paragraphs ─────────
-                # PaddleOCR returns line-by-line; merge adjacent orphans
-                # vertically close to each other (same paragraph).
-                orphans = [e for e in elements if e.get('_orphan')]
-                non_orphans = [e for e in elements if not e.get('_orphan')]
-
-                if len(orphans) > 1:
-                    orphans.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
-                    merged = [orphans[0]]
-
-                    for orph in orphans[1:]:
+                    for line in raw_lines[1:]:
                         prev = merged[-1]
-                        pb = prev['bbox']   # [x1,y1,x2,y2]
-                        ob = orph['bbox']
+                        pb = prev['bbox']
+                        lb = line['bbox']
 
-                        vertical_gap = ob[1] - pb[3]  # top of new - bottom of prev
-                        x_overlap = min(pb[2], ob[2]) - max(pb[0], ob[0])
-                        min_width = min(pb[2] - pb[0], ob[2] - ob[0]) or 1
+                        vertical_gap = lb[1] - pb[3]  # top of new - bottom of prev
+                        x_overlap = min(pb[2], lb[2]) - max(pb[0], lb[0])
+                        min_width = min(pb[2] - pb[0], lb[2] - lb[0]) or 1
 
-                        # Merge if: vertically close (<25px, was 15px) AND X overlaps >20%
-                        # The relaxed threshold handles documents with inconsistent line spacing
+                        # Merge if vertically close (<25px) AND horizontally overlapping (>20%)
                         if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
-                            # Merge text and expand bbox
-                            prev['text'] = prev['text'] + ' ' + orph['text']
+                            prev['text'] = prev['text'] + ' ' + line['text']
                             prev['bbox'] = [
-                                min(pb[0], ob[0]),
-                                min(pb[1], ob[1]),
-                                max(pb[2], ob[2]),
-                                max(pb[3], ob[3])
+                                min(pb[0], lb[0]),
+                                min(pb[1], lb[1]),
+                                max(pb[2], lb[2]),
+                                max(pb[3], lb[3])
                             ]
                             prev['confidence'] = round(
-                                (prev['confidence'] + orph['confidence']) / 2, 2
+                                (prev['confidence'] + line['confidence']) / 2, 2
                             )
                         else:
-                            merged.append(orph)
+                            merged.append(dict(line))
 
-                    elements = non_orphans + merged
-                    logger.info(f"📦 Merged {orphan_count} orphan lines → {len(merged)} paragraph(s)")
+                    # ── Determine type (heading vs paragraph) ──
+                    # Use font size heuristic: tall text relative to page = heading
+                    avg_line_height = sum(
+                        m['bbox'][3] - m['bbox'][1] for m in merged
+                    ) / max(len(merged), 1)
 
-                # Re-sort all elements top-to-bottom after adding orphans
-                elements.sort(key=lambda e: e['bbox'][1])
-            else:
-                logger.info("✓ No orphan text found — PPStructure covered everything")
+                    for m in merged:
+                        line_h = m['bbox'][3] - m['bbox'][1]
+                        text_len = len(m['text'])
+
+                        # Heading heuristic: short text + tall font OR all caps
+                        is_heading = (
+                            (line_h > avg_line_height * 1.3 and text_len < 80)
+                            or (m['text'].isupper() and text_len < 60)
+                            or (text_len < 50 and line_h > 30)
+                        )
+
+                        elements.append({
+                            "type": "heading" if is_heading else "paragraph",
+                            "text": m['text'],
+                            "bbox": m['bbox'],
+                            "confidence": m['confidence'],
+                        })
+                        text_line_count += 1
+
+                    logger.info(
+                        f"📝 Full-page OCR: {len(raw_lines)} lines → "
+                        f"{len(merged)} paragraphs ({text_line_count} text elements)"
+                    )
 
         except Exception as e:
-            logger.warning(f"⚠️ Orphan text recovery failed (non-fatal): {e}")
+            logger.error(f"Full-page OCR failed: {e}")
+
+        # Sort all elements by vertical position (reading order)
+        elements.sort(key=lambda e: e['bbox'][1])
+
+
+
 
         # ── STAGE 2.55: Tesseract Full-Page Pass (Indonesia only) ────────────
         # Khusus dokumen ID: jalankan Tesseract pada seluruh halaman dengan PSM 3
