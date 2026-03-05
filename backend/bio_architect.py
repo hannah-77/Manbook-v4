@@ -260,10 +260,10 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     # Cover Page
     # ─────────────────────────────────────────────
-    def _build_cover_page(self, doc, original_filename, product_name="", product_code="", lang='id'):
+    def _build_cover_page(self, doc, original_filename, product_name="", product_desc="", lang='id'):
         """
         Cover page layout (sesuai referensi):
-          - Kiri atas  : Nama produk bold + kode model
+          - Kiri atas  : Nama produk bold + deskripsi
           - Tengah     : "BUKU MANUAL" atau "MANUAL BOOK" bold besar
           - Bawah      : Letterhead full-width (wave + logo)
         """
@@ -292,18 +292,18 @@ class BioArchitect:
         rn.font.bold  = True
         rn.font.color.rgb = self.COLOR_BLACK
 
-        # Kode model (misal: EEG-32)
-        if product_code:
-            p_code = doc.add_paragraph()
-            p_code.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p_code.paragraph_format.space_before = Pt(8)
-            p_code.paragraph_format.space_after  = Pt(0)
-            p_code.paragraph_format.first_line_indent = Pt(0)
-            rc = p_code.add_run(product_code)
-            rc.font.name  = 'Arial'
-            rc.font.size  = Pt(45)
-            rc.font.bold  = True
-            rc.font.color.rgb = self.COLOR_BLACK
+        # Deskripsi produk (di bawah nama produk)
+        if product_desc:
+            p_desc = doc.add_paragraph()
+            p_desc.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p_desc.paragraph_format.space_before = Pt(8)
+            p_desc.paragraph_format.space_after  = Pt(0)
+            p_desc.paragraph_format.first_line_indent = Pt(0)
+            rd = p_desc.add_run(product_desc)
+            rd.font.name  = 'Arial'
+            rd.font.size  = Pt(16)
+            rd.font.bold  = False
+            rd.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
 
         # ── Spasi besar di tengah ke bawah ────────────────────────────
         for _ in range(25):  # lebih banyak spasi agar teks turun lebih rendah
@@ -523,7 +523,8 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     # Main Builder
     # ─────────────────────────────────────────────
-    def build_report(self, classified_data, original_filename, lang='id'):
+    def build_report(self, classified_data, original_filename, lang='id',
+                     custom_product_name=None, custom_product_desc=None):
         doc = Document()
 
         self._set_fixed_margins(doc)
@@ -534,31 +535,91 @@ class BioArchitect:
         bab_label_base = "Chapter" if doc_lang == 'en' else "BAB"
         self._add_header_footer(doc, bab_label=bab_label_base)
 
-        # Ekstrak nama produk & kode model dari classified_data (skip generic titles)
+        # Ekstrak nama produk & deskripsi dari classified_data (skip generic titles)
         product_name = ""
-        product_code = ""
+        product_desc = ""
         generic_titles = {'user manual', 'manual book', 'buku manual', 'operating manual',
                           'instruction manual', 'table of contents', 'daftar isi', 'cover',
                           'introduction', 'pendahuluan', 'kata pengantar', 'preface'}
+        # Cover-page specific terms that should NOT appear in BAB 1 content
+        cover_only_titles = {'petunjuk pengguna', 'petunjuk pemakaian', 'user guide',
+                             'owner manual', 'service manual', 'instruction manual',
+                             'manual pengguna', 'panduan pengguna'}
         # Accept either BAB 1 or Chapter 1 for cover data
         cover_chapters = ('BAB 1', 'Chapter 1')
-        for item in classified_data:
-            if item.get('type') in ('title', 'heading') and item.get('chapter_id') in cover_chapters:
-                text = item.get('normalized', '').strip()
-                # Skip generic titles
-                if text and len(text) > 3 and text.lower() not in generic_titles:
-                    if not product_name:
-                        product_name = text
-                    elif not product_code:
-                        product_code = text
-                        break
+        cover_item_indices = set()  # Track indices of items used for cover page
 
-        self._build_cover_page(doc, original_filename, product_name, product_code, lang=doc_lang)
+        # Collect candidate headings (non-generic) from BAB 1
+        heading_candidates = []
+        for idx, item in enumerate(classified_data):
+            if item.get('chapter_id') not in cover_chapters:
+                continue
+            item_type = item.get('type', '')
+            text = item.get('normalized', '').strip()
+            text_lower = text.lower() if text else ''
+
+            if item_type in ('title', 'heading'):
+                # Mark generic cover titles for exclusion
+                if text_lower in generic_titles or text_lower in cover_only_titles:
+                    cover_item_indices.add(idx)
+                    continue
+                
+                # Skip known brand names
+                if 'elitech' in text_lower or 'technovision' in text_lower or text_lower.startswith('pt.'):
+                    continue
+                    
+                if text and len(text) > 2:
+                    heading_candidates.append((idx, text))
+                    cover_item_indices.add(idx)
+
+        # Pick product name: prefer heading with digits (model number), else first candidate
+        product_name_idx = -1
+        if heading_candidates:
+            model_candidates = [(i, t) for i, t in heading_candidates if any(c.isdigit() for c in t)]
+            if model_candidates:
+                product_name_idx, product_name = model_candidates[0]
+            else:
+                product_name_idx, product_name = heading_candidates[0]
+
+        # Description = next text element AFTER product name in document order
+        # (short description like "Pengukur Panjang Badan Bayi dan Pengukur Tinggi Badan Dewasa")
+        if product_name_idx >= 0:
+            for idx, item in enumerate(classified_data):
+                if idx <= product_name_idx:
+                    continue
+                if item.get('chapter_id') not in cover_chapters:
+                    continue
+                item_type = item.get('type', '')
+                if item_type not in ('title', 'heading', 'paragraph'):
+                    continue
+                text = item.get('normalized', '').strip()
+                text_lower = text.lower() if text else ''
+                
+                # Skip known brand names
+                if 'elitech' in text_lower or 'technovision' in text_lower or text_lower.startswith('pt.'):
+                    continue
+                    
+                if text and len(text) > 3 and text_lower not in generic_titles and text_lower not in cover_only_titles:
+                    product_desc = text
+                    cover_item_indices.add(idx)
+                    break
+
+        # Apply custom overrides if user has edited them
+        if custom_product_name:
+            product_name = custom_product_name
+        if custom_product_desc:
+            product_desc = custom_product_desc
+
+        self._build_cover_page(doc, original_filename, product_name, product_desc, lang=doc_lang)
 
         # Kelompokkan per BAB (dilakukan lebih awal agar bisa dipakai TOC & konten)
+        # Items that were used for the cover page are EXCLUDED from chapter content
         taxonomy_keys = list(BioBrain().taxonomy.keys())
         grouped = {k: [] for k in taxonomy_keys}
-        for item in classified_data:
+        for idx, item in enumerate(classified_data):
+            # Skip items already used for cover page (by index or by flag)
+            if idx in cover_item_indices or item.get('is_cover'):
+                continue
             key = item['chapter_id']
             if key in grouped:
                 grouped[key].append(item)
