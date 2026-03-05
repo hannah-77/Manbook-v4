@@ -164,12 +164,18 @@ class GenerateReportRequest(BaseModel):
     items: list[dict]
     filename: str
     lang: str = "id"
+    custom_product_name: str | None = None
+    custom_product_desc: str | None = None
 
 @app.post("/generate_custom_report")
 async def generate_custom_report(req: GenerateReportRequest):
     try:
         # Panggil BioArchitect dengan data "items" baru yang sudah di-edit pengguna
-        result = architect_module.build_report(req.items, req.filename, lang=req.lang)
+        result = architect_module.build_report(
+            req.items, req.filename, lang=req.lang,
+            custom_product_name=req.custom_product_name,
+            custom_product_desc=req.custom_product_desc
+        )
         word_filename = result.get('word_file')
         
         if word_filename:
@@ -646,8 +652,32 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                         time.sleep(0.5)
                     except Exception:
                         pass
+        # ── STEP 2.6: Mark Cover Page Items ─────────────────────────
+        # Items in BAB 1 / Chapter 1 that are short heading/title elements
+        # are actually cover page text (product name, company, generic titles).
+        # Mark them so frontend displays them as cover and export skips them.
+        cover_generic = {'user manual', 'manual book', 'buku manual', 'operating manual',
+                         'instruction manual', 'table of contents', 'daftar isi', 'cover',
+                         'introduction', 'pendahuluan', 'kata pengantar', 'preface',
+                         'petunjuk pengguna', 'petunjuk pemakaian', 'user guide',
+                         'owner manual', 'service manual', 'manual pengguna', 'panduan pengguna'}
+        first_chapter = "Chapter 1" if doc_language == 'en' else "BAB 1"
+        cover_count = 0
+        for item in structured_data:
+            if item.get('chapter_id') != first_chapter:
+                continue
+            if item.get('type') in ('title', 'heading'):
+                text = (item.get('normalized', '') or '').strip()
+                text_lower = text.lower()
+                # Mark as cover if: generic title, or short heading (< 40 chars, likely product/brand name)
+                if text_lower in cover_generic or (len(text) < 40 and cover_count < 4):
+                    item['is_cover'] = True
+                    cover_count += 1
 
-        # 2.5 CHECK MISSING CHAPTERS (Report only — no auto-generation)
+        if cover_count > 0:
+            logger.info(f"📋 Marked {cover_count} items as cover page elements")
+
+        # 2.7 CHECK MISSING CHAPTERS (Report only — no auto-generation)
         existing_chapters = set(item['chapter_id'] for item in structured_data)
         all_chapters = [f"Chapter {i}" for i in range(1, 8)] if doc_language == 'en' else [f"BAB {i}" for i in range(1, 8)]
         
