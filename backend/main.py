@@ -160,6 +160,124 @@ def convert_pdf_to_images_safe(path):
 def health():
     return {"status": "BioManual System Online"}
 
+class GenerateChapterRequest(BaseModel):
+    chapter_id: str
+    product_name: str
+    product_desc: str
+    lang: str = "id"
+
+@app.post("/generate_chapter")
+async def generate_chapter(req: GenerateChapterRequest):
+    try:
+        from openrouter_client import get_openrouter_client
+        from bio_brain import BioBrain
+        import json, re
+        
+        client = get_openrouter_client()
+        if not client:
+            return {"success": False, "error": "AI client not configured."}
+            
+        lang_str = "Bahasa Indonesia" if req.lang == "id" else "English"
+        
+        # Get actual chapter title from taxonomy
+        brain = BioBrain()
+        chapter_title = ""
+        if req.chapter_id in brain.taxonomy:
+            chapter_title = brain.taxonomy[req.chapter_id]["title"]
+            
+        # Bilingual Support
+        if req.lang == "en":
+            table_instruction = "Use clear explanatory paragraphs."
+            if req.chapter_id in ('BAB 5', 'Chapter 5'):
+                table_instruction = """BECAUSE THIS IS TROUBLESHOOTING, YOUR ANSWER MUST BE FORMATTED AS A MARKDOWN TABLE.
+Example format inside the paragraph content:
+| Problem | Possible Cause | Action/Solution |
+|---|---|---|
+| Screen is black | Power cable disconnected | Check and connect cable |"""
+
+            prompt = f"""You are an expert technical writer for medical equipment. Format your response EXACTLY as a JSON array.
+
+Your task is to draft content for this manual book chapter:
+CHAPTER: {req.chapter_id}
+TITLE: {chapter_title}
+
+Medical Device Information:
+- Product Name: {req.product_name}
+- Description: {req.product_desc}
+
+CRITICAL RULES:
+1. You MUST ONLY write about topics related to "{chapter_title}".
+2. DO NOT include "Technical Specifications" unless this is the Specification chapter.
+3. DO NOT invent unnecessary components. Focus on standard operational procedures for this medical device.
+4. ABSOLUTELY NO CHINESE/MANDARIN CHARACTERS. The entire text must be strictly in English. Never use terms like 身高 or 施加力.
+5. {table_instruction}
+6. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+
+The return format MUST BE a pure JSON array (NOT standard markdown), where each element has a "type" and "normalized". Example:
+[
+  {{"type": "heading", "normalized": "Routine Cleaning"}},
+  {{"type": "paragraph", "normalized": "Turn off the device before starting the cleaning process..."}}
+]
+Output JSON ONLY. Do not write any introduction or conclusion sentences.
+"""
+        else:
+            table_instruction = "Gunakan paragraf teks penjelasan yang jelas."
+            if req.chapter_id in ('BAB 5', 'Chapter 5'):
+                 table_instruction = """KARENA INI ADALAH PEMECAHAN MASALAH, FORMAT JAWABAN ANDA HARUS BERUPA TABEL MARKDOWN.
+Contoh penulisan di dalam isi paragraph:
+| Permasalahan | Kemungkinan Penyebab | Tindakan/Solusi |
+|---|---|---|
+| Layar mati | Kabel power lepas | Periksa dan pasang kabel |"""
+
+            prompt = f"""You are an expert technical writer for medical equipment. Format your response EXACTLY as a JSON array.
+
+Tugas Anda adalah menulis konten draf untuk manual book bagian:
+BAB: {req.chapter_id}
+JUDUL BAB: {chapter_title}
+
+Informasi Alat Kesehatan:
+- Nama Produk: {req.product_name}
+- Deskripsi: {req.product_desc}
+
+ATURAN SANGAT PENTING:
+1. Anda HANYA boleh menulis topik seputar "{chapter_title}".
+2. JANGAN memasukkan "Spesifikasi Teknis" jika ini bukan bab Spesifikasi.
+3. JANGAN mengarang komponen yang tidak perlu. Fokus pada prosedur umum standar alat tersebut.
+4. WAJIB 100% BAHASA INDONESIA. DILARANG KERAS MENYELIPKAN AKSARA MANDARIN/CHINESE! JANGAN PERNAH MENULIS KATA SEPERTI 身高 atau 施加力.
+5. {table_instruction}
+6. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+
+Format kembalian BUKAN markdown biasa, melainkan murni JSON array, tiap elemen memiliki "type" dan "normalized". Contoh:
+[
+  {{"type": "heading", "normalized": "Pembersihan Rutin"}},
+  {{"type": "paragraph", "normalized": "Matikan daya alat sebelum memulai pembersihan..."}}
+]
+Keluarkan output JSON saja. Jangan tulis kalimat pengantar/penutup apapun.
+"""
+        response_text = client.call(prompt)
+        
+        # Hard-filter any Chinese/CJK characters physically from the response string just in case
+        response_text = re.sub(r'[\u4e00-\u9fff\u3400-\u4dbf]+', '', response_text)
+
+        clean_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+        # Find first [ and last ]
+        start_idx = clean_text.find('[')
+        end_idx = clean_text.rfind(']')
+        if start_idx != -1 and end_idx != -1:
+            clean_text = clean_text[start_idx:end_idx+1]
+            
+        items = json.loads(clean_text)
+        
+        # Ensure format and assign chapter
+        for item in items:
+            item["chapter_id"] = req.chapter_id
+            
+        return {"success": True, "items": items}
+    except Exception as e:
+        import traceback
+        logging.error(f"Error generating chapter: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
+
 class GenerateReportRequest(BaseModel):
     items: list[dict]
     filename: str
@@ -376,7 +494,7 @@ def _detect_lang_from_text(text: str) -> dict:
     else:
         label   = "English"
         flag    = "🇬🇧"
-        message = f"{flag} Document detected as English. PaddleOCR will be used."
+        message = f"{flag} Document detected as English. Tesseract OCR will be used."
 
     # Confidence tier
     if final_conf >= 0.85:

@@ -705,6 +705,39 @@ class BioArchitect:
                         p.runs[0].font.color.rgb = self.COLOR_GRAY
 
                 else:  # Body text
+                    lines = text.strip().split('\n')
+                    is_md_table = False
+                    if len(lines) >= 3 and '|' in lines[0] and '|' in lines[1] and ('-' in lines[1] or '=' in lines[1]):
+                        is_md_table = True
+                        
+                    if is_md_table:
+                        table_data = []
+                        for line in lines:
+                            line = line.strip()
+                            if not line or '|-' in line or '-|' in line or '---|' in line:
+                                continue
+                            if line.startswith('|'): line = line[1:]
+                            if line.endswith('|'): line = line[:-1]
+                            cols = [c.strip() for c in line.split('|')]
+                            table_data.append(cols)
+                            
+                        if table_data and len(table_data) > 0:
+                            num_cols = max(len(row) for row in table_data)
+                            tbl = doc.add_table(rows=len(table_data), cols=num_cols)
+                            tbl.style = 'Table Grid'
+                            for r_idx, row in enumerate(table_data):
+                                for c_idx, val in enumerate(row):
+                                    if c_idx < num_cols:
+                                        c = tbl.cell(r_idx, c_idx)
+                                        c.text = val
+                                        # Bold header
+                                        if r_idx == 0:
+                                            for para in c.paragraphs:
+                                                for run in para.runs:
+                                                    run.font.bold = True
+                            doc.add_paragraph() # Spacing
+                            continue
+
                     p = doc.add_paragraph(text)
                     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 

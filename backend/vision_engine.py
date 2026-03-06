@@ -443,106 +443,83 @@ class BioVisionHybrid:
             psm = 4                     # Multi-column / mixed layout
 
         # ════════════════════════════════════════════════════
-        # INDONESIAN → Tesseract OCR (lang pack 'ind')
+        # INDONESIAN & ENGLISH → Tesseract OCR
         # ════════════════════════════════════════════════════
-        if lang == 'id':
-            if TESSERACT_AVAILABLE:
-                try:
-                    rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(rgb)
+        tess_lang = 'ind' if lang == 'id' else 'eng'
+        
+        if TESSERACT_AVAILABLE:
+            try:
+                rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb)
 
-                    config = f'--oem 3 --psm {psm}'
-                    data = pytesseract.image_to_data(
-                        pil_img, lang='ind', config=config,
+                config = f'--oem 3 --psm {psm}'
+                data = pytesseract.image_to_data(
+                    pil_img, lang=tess_lang, config=config,
+                    output_type=pytesseract.Output.DICT
+                )
+
+                words = []
+                confidences = []
+                for i, txt in enumerate(data['text']):
+                    txt = txt.strip()
+                    conf = int(data['conf'][i])
+                    # Threshold: 25 (balanced)
+                    if txt and conf > 25:
+                        words.append(txt)
+                        confidences.append(conf / 100.0)
+
+                if words:
+                    avg_conf = sum(confidences) / len(confidences)
+                    return ' '.join(words), avg_conf
+
+                # Tesseract found nothing with PSM N → retry with PSM 11
+                # (sparse text — finds individual words anywhere)
+                if psm != 11:
+                    data2 = pytesseract.image_to_data(
+                        pil_img, lang=tess_lang,
+                        config='--oem 3 --psm 11',
                         output_type=pytesseract.Output.DICT
                     )
-
-                    words = []
-                    confidences = []
-                    for i, txt in enumerate(data['text']):
+                    words2, confs2 = [], []
+                    for i, txt in enumerate(data2['text']):
                         txt = txt.strip()
-                        conf = int(data['conf'][i])
-                        # Threshold: 25 (balanced)
+                        conf = int(data2['conf'][i])
                         if txt and conf > 25:
-                            words.append(txt)
-                            confidences.append(conf / 100.0)
+                            words2.append(txt)
+                            confs2.append(conf / 100.0)
+                    if words2:
+                        avg_conf = sum(confs2) / len(confs2)
+                        logger.debug(f"PSM 11 rescue ({tess_lang}): found {len(words2)} words")
+                        return ' '.join(words2), avg_conf
 
-                    if words:
-                        avg_conf = sum(confidences) / len(confidences)
-                        return ' '.join(words), avg_conf
-
-                    # Tesseract found nothing with PSM N → retry with PSM 11
-                    # (sparse text — finds individual words anywhere)
-                    if psm != 11:
-                        data2 = pytesseract.image_to_data(
-                            pil_img, lang='ind',
-                            config='--oem 3 --psm 11',
-                            output_type=pytesseract.Output.DICT
-                        )
-                        words2, confs2 = [], []
-                        for i, txt in enumerate(data2['text']):
-                            txt = txt.strip()
-                            conf = int(data2['conf'][i])
-                            if txt and conf > 25:
-                                words2.append(txt)
-                                confs2.append(conf / 100.0)
-                        if words2:
-                            avg_conf = sum(confs2) / len(confs2)
-                            logger.debug(f"PSM 11 rescue: found {len(words2)} words")
-                            return ' '.join(words2), avg_conf
-
-                    return "", 0.0
-
-                except Exception as e:
-                    logger.warning(f"Tesseract (ind) failed: {e}")
-                    # Fall through to PaddleOCR
-
-            else:
-                logger.warning("⚠️ Tesseract not available — using PaddleOCR as fallback for Indonesian")
-
-            # Fallback: PaddleOCR for Indonesian
-            try:
-                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
-                if ocr_result and ocr_result[0]:
-                    lines, confidences = [], []
-                    for line in ocr_result[0]:
-                        text = line[1][0]
-                        conf = line[1][1]
-                        if conf > 0.35:   # balanced threshold
-                            lines.append(text)
-                            confidences.append(conf)
-                    if lines:
-                        avg_conf = sum(confidences) / len(confidences)
-                        return " ".join(lines), avg_conf
-            except Exception as e:
-                logger.warning(f"PaddleOCR fallback (id) failed: {e}")
-
-            return "", 0.0
-
-        # ════════════════════════════════════════════════════
-        # ENGLISH → PaddleOCR ONLY (lang model 'en')
-        # ════════════════════════════════════════════════════
-        else:  # lang == 'en'
-            try:
-                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
-                if ocr_result and ocr_result[0]:
-                    lines = []
-                    confidences = []
-                    for line in ocr_result[0]:
-                        text = line[1][0]
-                        conf = line[1][1]
-                        if conf > 0.35:   # balanced threshold
-                            lines.append(text)
-                            confidences.append(conf)
-
-                    if lines:
-                        avg_conf = sum(confidences) / len(confidences)
-                        return " ".join(lines), avg_conf
+                return "", 0.0
 
             except Exception as e:
-                logger.warning(f"PaddleOCR (en) failed: {e}")
+                logger.warning(f"Tesseract ({tess_lang}) failed: {e}")
+                # Fall through to PaddleOCR
+        else:
+            logger.warning(f"⚠️ Tesseract not available — using PaddleOCR as fallback for {lang}")
 
-            return "", 0.0
+        # ════════════════════════════════════════════════════
+        # FALLBACK → PaddleOCR ONLY 
+        # ════════════════════════════════════════════════════
+        try:
+            ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
+            if ocr_result and ocr_result[0]:
+                lines, confidences = [], []
+                for line in ocr_result[0]:
+                    text = line[1][0]
+                    conf = line[1][1]
+                    if conf > 0.35:   # balanced threshold
+                        lines.append(text)
+                        confidences.append(conf)
+                if lines:
+                    avg_conf = sum(confidences) / len(confidences)
+                    return " ".join(lines), avg_conf
+        except Exception as e:
+            logger.warning(f"PaddleOCR fallback ({lang}) failed: {e}")
+
+        return "", 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # STAGE 3: AI Chapter Classification (TEXT-ONLY — no image!)
