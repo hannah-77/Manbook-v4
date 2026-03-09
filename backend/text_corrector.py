@@ -392,11 +392,51 @@ _CONTEXT_RULES = [
         "triggers": [],  # placeholder — no change needed, just an example template
         "lang": "en",
     },
+    # ── Merek dan Nama Produk ──────────────────────
+    {
+        "target": "ptb",
+        "correct": "PTB",
+        "triggers": ["model", "seri", "produk", "type", "nomor", "alat", "device", "2in", "in", "1"],
+        "lang": "id",
+    },
+    {
+        "target": "ptb",
+        "correct": "PTB",
+        "triggers": ["model", "series", "product", "type", "number", "device", "2in", "in", "1"],
+        "lang": "en",
+    },
+    {
+        "target": "elitech",
+        "correct": "Elitech",
+        "triggers": ["pt", "perusahaan", "produk", "company", "manufacturer", "buatan", "oleh", "by"],
+        "lang": "id",
+    },
+    {
+        "target": "elitech",
+        "correct": "Elitech",
+        "triggers": ["pt", "perusahaan", "produk", "company", "manufacturer", "buatan", "oleh", "by"],
+        "lang": "en",
+    },
 ]
 
 
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Menghitung jarak numerik (Edit Distance) murni tanpa library eksternal."""
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+    distances = range(len(s1) + 1)
+    for index2, char2 in enumerate(s2):
+        new_distances = [index2 + 1]
+        for index1, char1 in enumerate(s1):
+            if char1 == char2:
+                new_distances.append(distances[index1])
+            else:
+                new_distances.append(1 + min((distances[index1], distances[index1 + 1], new_distances[-1])))
+        distances = new_distances
+    return distances[-1]
+
 def _stage_b_context(text: str, lang: str = "id", window_size: int = 5) -> str:
-    """Koreksi kata berdasarkan konteks kata-kata di sekitarnya."""
+    """Koreksi kata berdasarkan konteks kata-kata di sekitarnya. Mendukung Typo / Fuzzy Matching (Levenshtein)."""
     tokens = text.split()
     new_tokens = tokens.copy()
 
@@ -404,17 +444,44 @@ def _stage_b_context(text: str, lang: str = "id", window_size: int = 5) -> str:
 
     for i, word in enumerate(tokens):
         clean_word = re.sub(r"[^\w]", "", word.lower())
+        if not clean_word:
+            continue
 
         for rule in active_rules:
-            if clean_word == rule["target"]:
+            target = rule["target"]
+            is_match = False
+            # 1. Exact Match
+            if clean_word == target:
+                is_match = True
+            # 2. Fuzzy Match (Jika memungkinkan, toleransi proporsional)
+            else:
+                max_dist = 1 if len(target) <= 4 else 2
+                if abs(len(clean_word) - len(target)) <= max_dist:
+                    dist = _levenshtein_distance(clean_word, target)
+                    if dist <= max_dist:
+                        is_match = True
+                    
+            if is_match:
                 start = max(0, i - window_size)
                 end   = min(len(tokens), i + window_size + 1)
                 context_window = [re.sub(r"[^\w]", "", t.lower()) for t in tokens[start:end]]
 
                 if any(trigger in context_window for trigger in rule["triggers"]):
-                    new_tokens[i] = word.lower().replace(rule["target"], rule["correct"])
+                    # Ganti kata aslinya dengan kata yang benar menurut rule
+                    # Pertahankan huruf kapital awal
+                    correct_word = rule["correct"]
+                    if word.isupper():
+                        correct_word = correct_word.upper()
+                    elif word[0].isupper():
+                        correct_word = correct_word.capitalize()
+                        
+                    # Gabungkan kembali tanda baca (prefix/suffix)
+                    prefix = re.match(r"^([^\w]*)", word).group(1)
+                    suffix = re.search(r"([^\w]*)$", word).group(1)
+                    
+                    new_tokens[i] = prefix + correct_word + suffix
                     logger.debug(
-                        f"[ContextRule] '{rule['target']}' → '{rule['correct']}' "
+                        f"[ContextRule] Fuzzy Match: '{word}' (mirip '{target}') → '{correct_word}' "
                         f"(trigger found in window)"
                     )
                     break  # Only apply the first matching rule
@@ -437,7 +504,14 @@ _ENTITY_MAP_ID = {
     "TECHNOVISON" : "TECHNOVISION",
     "Elteeh"      : "Elitech",      
     "ELTEEH"      : "ELITECH",
-    "Eltechf"     : "Elitech",      
+    "Eltechf"     : "Elitech",  
+    "Elitecho"    : "Elitech",
+    "PUB"         : "PTB",
+    "pub"         : "PTB",
+    "Pub"         : "PTB",
+    "PTB"         : "PTB",
+    "ptb"         : "PTB",
+    "Ptb"         : "PTB",
 
     # ── Kata OCR yang SELALU salah (tidak ambigu) ─────────────────
     # Koreksi kata-kata ini aman dilakukan tanpa melihat konteks
@@ -467,6 +541,17 @@ _ENTITY_MAP_ID = {
 }
 
 _ENTITY_MAP_EN = {
+    # ── Brand & nama perusahaan ──────────────────────────────────
+    "STINKO"      : "SINKO",
+    "PRIMAL"      : "PRIMA",
+    "TECHNOVISON" : "TECHNOVISION",
+    "Elteeh"      : "Elitech",      
+    "ELTEEH"      : "ELITECH",
+    "Eltechf"     : "Elitech",
+    "Elitecho"    : "Elitech",
+    "Elitech"     : "Elitech",
+    "PUB"         : "PTB",
+    
     # Common OCR errors in English manuals
     "installtion": "installation",
     "maintenence": "maintenance",
@@ -606,9 +691,12 @@ def _stage_a_symspell_with_tracking(text: str, lang: str = "id") -> tuple:
 
 def correct_ocr_text(text: str, lang: str = "id") -> str:
     """
-    DISABLED — SymSpell auto-correction was changing words incorrectly
-    (e.g. PRIMA → TERIMA). Returns text unchanged.
+    Koreksi teks pasca-OCR.
+    Hanya menjalankan Stage B (context) dan Stage C (entity/brand).
+    Stage A (Symspell Typo correction per-huruf) dimatikan.
     """
+    text = _stage_b_context(text, lang=lang)
+    text = _stage_c_entities(text, lang=lang)
     return text
 
 
@@ -648,8 +736,10 @@ def add_entity_mapping(wrong: str, right: str, lang: str = "id"):
 
 def correct_ocr_text_with_highlights(text: str, lang: str = "id") -> dict:
     """
-    DISABLED — SymSpell auto-correction was interfering with OCR results.
-    Returns text unchanged with no highlights.
+    Applies Stage B (Context) and Stage C (Entity Map) corrections.
+    Stage A (Symspell auto-correction with highlights) is DISABLED.
+    Returns: {"text": corrected_text, "highlights": []}
     """
-    return {"text": text, "highlights": []}
+    corrected = correct_ocr_text(text, lang=lang)
+    return {"text": corrected, "highlights": []}
 

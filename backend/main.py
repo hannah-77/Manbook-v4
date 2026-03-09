@@ -23,7 +23,7 @@ import traceback
 import uvicorn
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -494,7 +494,7 @@ def _detect_lang_from_text(text: str) -> dict:
     else:
         label   = "English"
         flag    = "🇬🇧"
-        message = f"{flag} Document detected as English. Tesseract OCR will be used."
+        message = f"{flag} Document detected as English. PaddleOCR will be used."
 
     # Confidence tier
     if final_conf >= 0.85:
@@ -854,7 +854,11 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
              }
 
 @app.post("/supplement/{session_id}")
-async def supplement_workflow(session_id: str, files: list[UploadFile] = File(...)):
+async def supplement_workflow(
+    session_id: str, 
+    files: list[UploadFile] = File(...),
+    target_chapter: str = Form(None)
+):
     """
     Endpoint untuk mengupload file tambahan ke sesi yang sudah ada.
     Menggabungkan hasil ekstraksi baru dengan yang lama.
@@ -868,7 +872,7 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
     base_filename = existing_session["original_filename"]
     
     file_names = [f.filename for f in files]
-    logger.info(f"Supplementing Session {session_id} with files: {file_names}")
+    logger.info(f"Supplementing Session {session_id} with files: {file_names}, target_chapter: {target_chapter}")
     
     progress_tracker[session_id].update({
         "status": "processing_supplement",
@@ -934,21 +938,25 @@ async def supplement_workflow(session_id: str, files: list[UploadFile] = File(..
                     element['text'] = corrected
                     normalized_result['corrected'] = corrected
                     
-                    # Cek missing chapter assignment
-                    bab_id, bab_title = "", ""
-                    missing_chapters = [c for c in all_ch if c not in existing_chapter_ids]
-
-                    if missing_chapters and len(element['text'].strip()) > 10:
-                        bab_id, bab_title = brain_module.semantic_mapping(element)
-                        
-                        # Jika Fallback ke BAB 1/Chapter 1 padahal sudah ada
-                        first_ch = all_ch[0]
-                        if bab_id == first_ch and first_ch not in missing_chapters:
-                            bab_id = missing_chapters[0]
-                            bab_title = brain_module.taxonomy[bab_id]["title"]
-                            brain_module.current_context = bab_id
+                    if target_chapter:
+                        bab_id = target_chapter
+                        bab_title = brain_module.taxonomy.get(bab_id, {}).get("title", "")
                     else:
-                        bab_id, bab_title = brain_module.semantic_mapping(element)
+                        # Cek missing chapter assignment
+                        bab_id, bab_title = "", ""
+                        missing_chapters = [c for c in all_ch if c not in existing_chapter_ids]
+
+                        if missing_chapters and len(element['text'].strip()) > 10:
+                            bab_id, bab_title = brain_module.semantic_mapping(element)
+                            
+                            # Jika Fallback ke BAB 1/Chapter 1 padahal sudah ada
+                            first_ch = all_ch[0]
+                            if bab_id == first_ch and first_ch not in missing_chapters:
+                                bab_id = missing_chapters[0]
+                                bab_title = brain_module.taxonomy[bab_id]["title"]
+                                brain_module.current_context = bab_id
+                        else:
+                            bab_id, bab_title = brain_module.semantic_mapping(element)
                     
                     supplementary_data.append({
                         "chapter_id"    : bab_id,

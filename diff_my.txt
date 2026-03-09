@@ -1,0 +1,214 @@
+diff --git a/backend/vision_engine.py b/backend/vision_engine.py
+index 59b6dc9..281576c 100644
+--- a/backend/vision_engine.py
++++ b/backend/vision_engine.py
+@@ -443,83 +443,106 @@ class BioVisionHybrid:
+             psm = 4                     # Multi-column / mixed layout
+ 
+         # ════════════════════════════════════════════════════
+-        # INDONESIAN & ENGLISH → Tesseract OCR
++        # INDONESIAN → Tesseract OCR (lang pack 'ind')
+         # ════════════════════════════════════════════════════
+-        tess_lang = 'ind' if lang == 'id' else 'eng'
+-        
+-        if TESSERACT_AVAILABLE:
+-            try:
+-                rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
+-                pil_img = Image.fromarray(rgb)
+-
+-                config = f'--oem 3 --psm {psm}'
+-                data = pytesseract.image_to_data(
+-                    pil_img, lang=tess_lang, config=config,
+-                    output_type=pytesseract.Output.DICT
+-                )
++        if lang == 'id':
++            if TESSERACT_AVAILABLE:
++                try:
++                    rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
++                    pil_img = Image.fromarray(rgb)
+ 
+-                words = []
+-                confidences = []
+-                for i, txt in enumerate(data['text']):
+-                    txt = txt.strip()
+-                    conf = int(data['conf'][i])
+-                    # Threshold: 25 (balanced)
+-                    if txt and conf > 25:
+-                        words.append(txt)
+-                        confidences.append(conf / 100.0)
+-
+-                if words:
+-                    avg_conf = sum(confidences) / len(confidences)
+-                    return ' '.join(words), avg_conf
+-
+-                # Tesseract found nothing with PSM N → retry with PSM 11
+-                # (sparse text — finds individual words anywhere)
+-                if psm != 11:
+-                    data2 = pytesseract.image_to_data(
+-                        pil_img, lang=tess_lang,
+-                        config='--oem 3 --psm 11',
++                    config = f'--oem 3 --psm {psm}'
++                    data = pytesseract.image_to_data(
++                        pil_img, lang='ind', config=config,
+                         output_type=pytesseract.Output.DICT
+                     )
+-                    words2, confs2 = [], []
+-                    for i, txt in enumerate(data2['text']):
++
++                    words = []
++                    confidences = []
++                    for i, txt in enumerate(data['text']):
+                         txt = txt.strip()
+-                        conf = int(data2['conf'][i])
++                        conf = int(data['conf'][i])
++                        # Threshold: 25 (balanced)
+                         if txt and conf > 25:
+-                            words2.append(txt)
+-                            confs2.append(conf / 100.0)
+-                    if words2:
+-                        avg_conf = sum(confs2) / len(confs2)
+-                        logger.debug(f"PSM 11 rescue ({tess_lang}): found {len(words2)} words")
+-                        return ' '.join(words2), avg_conf
++                            words.append(txt)
++                            confidences.append(conf / 100.0)
++
++                    if words:
++                        avg_conf = sum(confidences) / len(confidences)
++                        return ' '.join(words), avg_conf
++
++                    # Tesseract found nothing with PSM N → retry with PSM 11
++                    # (sparse text — finds individual words anywhere)
++                    if psm != 11:
++                        data2 = pytesseract.image_to_data(
++                            pil_img, lang='ind',
++                            config='--oem 3 --psm 11',
++                            output_type=pytesseract.Output.DICT
++                        )
++                        words2, confs2 = [], []
++                        for i, txt in enumerate(data2['text']):
++                            txt = txt.strip()
++                            conf = int(data2['conf'][i])
++                            if txt and conf > 25:
++                                words2.append(txt)
++                                confs2.append(conf / 100.0)
++                        if words2:
++                            avg_conf = sum(confs2) / len(confs2)
++                            logger.debug(f"PSM 11 rescue: found {len(words2)} words")
++                            return ' '.join(words2), avg_conf
++
++                    return "", 0.0
++
++                except Exception as e:
++                    logger.warning(f"Tesseract (ind) failed: {e}")
++                    # Fall through to PaddleOCR
+ 
+-                return "", 0.0
++            else:
++                logger.warning("⚠️ Tesseract not available — using PaddleOCR as fallback for Indonesian")
+ 
++            # Fallback: PaddleOCR for Indonesian
++            try:
++                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
++                if ocr_result and ocr_result[0]:
++                    lines, confidences = [], []
++                    for line in ocr_result[0]:
++                        text = line[1][0]
++                        conf = line[1][1]
++                        if conf > 0.35:   # balanced threshold
++                            lines.append(text)
++                            confidences.append(conf)
++                    if lines:
++                        avg_conf = sum(confidences) / len(confidences)
++                        return " ".join(lines), avg_conf
+             except Exception as e:
+-                logger.warning(f"Tesseract ({tess_lang}) failed: {e}")
+-                # Fall through to PaddleOCR
+-        else:
+-            logger.warning(f"⚠️ Tesseract not available — using PaddleOCR as fallback for {lang}")
++                logger.warning(f"PaddleOCR fallback (id) failed: {e}")
++
++            return "", 0.0
+ 
+         # ════════════════════════════════════════════════════
+-        # FALLBACK → PaddleOCR ONLY 
++        # ENGLISH → PaddleOCR ONLY (lang model 'en')
+         # ════════════════════════════════════════════════════
+-        try:
+-            ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
+-            if ocr_result and ocr_result[0]:
+-                lines, confidences = [], []
+-                for line in ocr_result[0]:
+-                    text = line[1][0]
+-                    conf = line[1][1]
+-                    if conf > 0.35:   # balanced threshold
+-                        lines.append(text)
+-                        confidences.append(conf)
+-                if lines:
+-                    avg_conf = sum(confidences) / len(confidences)
+-                    return " ".join(lines), avg_conf
+-        except Exception as e:
+-            logger.warning(f"PaddleOCR fallback ({lang}) failed: {e}")
++        else:  # lang == 'en'
++            try:
++                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
++                if ocr_result and ocr_result[0]:
++                    lines = []
++                    confidences = []
++                    for line in ocr_result[0]:
++                        text = line[1][0]
++                        conf = line[1][1]
++                        if conf > 0.35:   # balanced threshold
++                            lines.append(text)
++                            confidences.append(conf)
++
++                    if lines:
++                        avg_conf = sum(confidences) / len(confidences)
++                        return " ".join(lines), avg_conf
+ 
+-        return "", 0.0
++            except Exception as e:
++                logger.warning(f"PaddleOCR (en) failed: {e}")
++
++            return "", 0.0
+ 
+     # ═══════════════════════════════════════════════════════════════
+     # STAGE 3: AI Chapter Classification (TEXT-ONLY — no image!)
+@@ -754,12 +777,34 @@ Output ONLY the JSON array, nothing else."""
+                         pb = prev['bbox']
+                         lb = line['bbox']
+ 
+-                        vertical_gap = lb[1] - pb[3]  # top of new - bottom of prev
++                        # Top of new line - Bottom of previous line
++                        vertical_gap = lb[1] - pb[3]
++                        # Height of previous line
++                        prev_height = max(pb[3] - pb[1], 10)
++                        
++                        # Jarak vertikal yang ditoleransi: maksimal ~1.8x tinggi huruf
++                        # (-20 untuk menoleransi jika bounding box sedikit tumpang tindih secara vertikal)
++                        is_close_vert = -20 <= vertical_gap <= max(50, prev_height * 2.0)
++
++                        # Evaluasi sebaris / horizontal overlap
+                         x_overlap = min(pb[2], lb[2]) - max(pb[0], lb[0])
+                         min_width = min(pb[2] - pb[0], lb[2] - lb[0]) or 1
+-
+-                        # Merge if vertically close (<25px) AND horizontally overlapping (>20%)
+-                        if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
++                        
++                        # Dikatakan sebaris/separagraf jika:
++                        # 1. Overlap sejati (x_overlap > 0 dan merepresentasikan minimal 10% tulisan terkecil)
++                        # 2. ATAU Margins kirinya hampir sejajar (selisih X awal < 60px) -> ini bagus untuk list/hanging indent
++                        # 3. ATAU baris baru dimulai tepat di sebelah kanan baris lama (seperti '3.' lalu 'pole...') dan selisihnya tidak lebih dari 80px (mencegah kolom baru)
++                        
++                        is_overlapping = (x_overlap / min_width > 0.10)
++                        is_left_aligned = abs(lb[0] - pb[0]) < 60
++                        is_inline_right = (pb[2] < lb[0] < pb[2] + 80) and (vertical_gap < prev_height * 0.5) # inline & sebelahan mendatar
++
++                        is_aligned_horiz = is_overlapping or is_left_aligned or is_inline_right
++
++                        # JIKA ini baris dari list yg beda (misal setelah ketemu "4." di line baru padahal sebelumnya "3."), jangan gabung
++                        looks_like_new_list_item = bool(re.match(r'^[0-9]+[\.\)]$', line['text'].strip())) and vertical_gap > 0
++
++                        if is_close_vert and is_aligned_horiz and not looks_like_new_list_item:
+                             prev['text'] = prev['text'] + ' ' + line['text']
+                             prev['bbox'] = [
+                                 min(pb[0], lb[0]),
