@@ -142,12 +142,12 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     def _add_header_footer(self, doc, bab_label=""):
         """
-        Header: nama dokumen (kiri) | label BAB (kanan)
-        Footer: logo strip perusahaan (kiri) + nomor halaman (kanan)
+        Header: KOSONG (tidak ada teks)
+        Footer: letterhead.png full-width (gelombang biru + logo Elitech) + nomor halaman
         """
         section = doc.sections[0]
 
-        # ── HEADER ──────────────────────────────────────────
+        # ── HEADER: Kosongkan ──────────────────────────────────────
         section.different_first_page_header_footer = True
         header = section.header
         header.is_linked_to_previous = False
@@ -156,45 +156,7 @@ class BioArchitect:
             header.add_paragraph()
         hp = header.paragraphs[0]
         hp.clear()
-        hp.paragraph_format.space_before = Pt(0)
-        hp.paragraph_format.space_after  = Pt(4)
-
-        # Kiri: nama aplikasi
-        run_left = hp.add_run("BioManual Auto-Standardizer")
-        run_left.font.name  = 'Arial'
-        run_left.font.size  = Pt(9)
-        run_left.font.color.rgb = self.COLOR_GRAY
-        run_left.font.italic = True
-
-        # Tab ke kanan
-        tab = OxmlElement('w:tab')
-        run_left._r.append(tab)
-
-        # Set tab stop kanan
-        pPr = hp._p.get_or_add_pPr()
-        tabs = OxmlElement('w:tabs')
-        tab_el = OxmlElement('w:tab')
-        tab_el.set(qn('w:val'), 'right')
-        tab_el.set(qn('w:pos'), '9360')   # 6.5" dalam twips (1"=1440)
-        tabs.append(tab_el)
-        pPr.append(tabs)
-
-        # Kanan: label BAB
-        run_right = hp.add_run(bab_label)
-        run_right.font.name  = 'Arial'
-        run_right.font.size  = Pt(9)
-        run_right.font.bold  = True
-        run_right.font.color.rgb = self.COLOR_PRIMARY
-
-        # Garis bawah header via border XML
-        pBdr = OxmlElement('w:pBdr')
-        bottom = OxmlElement('w:bottom')
-        bottom.set(qn('w:val'),  'single')
-        bottom.set(qn('w:sz'),   '6')
-        bottom.set(qn('w:space'),'1')
-        bottom.set(qn('w:color'), '1E3A8A')
-        pBdr.append(bottom)
-        pPr.append(pBdr)
+        # Header dibiarkan kosong sesuai permintaan user
 
         # ── FOOTER ──────────────────────────────────────────
         footer = section.footer
@@ -204,45 +166,11 @@ class BioArchitect:
             footer.add_paragraph()
         fp = footer.paragraphs[0]
         fp.clear()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(0)
+        fp.paragraph_format.space_after = Pt(0)
 
-        # Garis atas footer
-        fpPr = fp._p.get_or_add_pPr()
-        fBdr = OxmlElement('w:pBdr')
-        top  = OxmlElement('w:top')
-        top.set(qn('w:val'),  'single')
-        top.set(qn('w:sz'),   '4')
-        top.set(qn('w:space'),'1')
-        top.set(qn('w:color'), '1E3A8A')
-        fBdr.append(top)
-        fpPr.append(fBdr)
-
-        # Logo strip perusahaan (kiri)
-        if self.letterhead_path:
-            try:
-                run_logo = fp.add_run()
-                run_logo.add_picture(self.letterhead_path, height=Pt(28))
-            except Exception as e:
-                logger.warning(f"Gagal load letterhead: {e}")
-                fp.add_run("© BioManual").font.size = Pt(8)
-        else:
-            run_co = fp.add_run("© BioManual Auto-Standardizer")
-            run_co.font.name  = 'Arial'
-            run_co.font.size  = Pt(8)
-            run_co.font.color.rgb = self.COLOR_GRAY
-
-        # Tab ke kanan
-        run_tab = fp.add_run()
-        tab2 = OxmlElement('w:tab')
-        run_tab._r.append(tab2)
-
-        set_tabs2 = OxmlElement('w:tabs')
-        tab_el2   = OxmlElement('w:tab')
-        tab_el2.set(qn('w:val'), 'right')
-        tab_el2.set(qn('w:pos'), '9360')
-        set_tabs2.append(tab_el2)
-        fpPr.append(set_tabs2)
-
-        # Nomor halaman (kanan)
+        # Tambahkan nomor halaman di atas letterhead
         run_pg = fp.add_run()
         run_pg.font.name  = 'Arial'
         run_pg.font.size  = Pt(9)
@@ -257,12 +185,43 @@ class BioArchitect:
         fldChar2.set(qn('w:fldCharType'), 'end')
         run_pg._r.extend([fldChar1, instrText, fldChar2])
 
+        # Letterhead image (hanya bagian gelombang + logo) di bawah nomor halaman
+        if self.letterhead_path:
+            try:
+                from PIL import Image as PILImage
+                import io
+
+                # Crop hanya 30% bawah (gelombang biru + logo)
+                img = PILImage.open(self.letterhead_path)
+                img_w, img_h = img.size
+                crop_top = int(img_h * 0.70)
+                cropped = img.crop((0, crop_top, img_w, img_h))
+
+                img_buffer = io.BytesIO()
+                cropped.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+
+                fp_img = footer.add_paragraph()
+                fp_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                fp_img.paragraph_format.space_before = Pt(2)
+                fp_img.paragraph_format.space_after = Pt(0)
+                run_logo = fp_img.add_run()
+                run_logo.add_picture(img_buffer, width=Inches(6.5))
+            except Exception as e:
+                logger.warning(f"Gagal load letterhead di footer: {e}")
+                fp.add_run("\n© Elitech Technovision").font.size = Pt(8)
+        else:
+            run_co = fp.add_run("\n© Elitech Technovision")
+            run_co.font.name  = 'Arial'
+            run_co.font.size  = Pt(8)
+            run_co.font.color.rgb = self.COLOR_GRAY
+
     # ─────────────────────────────────────────────
     # Cover Page
     # ─────────────────────────────────────────────
     def _build_cover_page(self, doc, original_filename, product_name="", product_desc="", lang='id'):
         """
-        Cover page layout (sesuai referensi):
+        Cover page layout:
           - Kiri atas  : Nama produk bold + deskripsi
           - Tengah     : "BUKU MANUAL" atau "MANUAL BOOK" bold besar
           - Bawah      : Letterhead full-width (wave + logo)
@@ -270,12 +229,10 @@ class BioArchitect:
         # Extract product_name from original_filename if missing or too messy
         if not product_name:
             stem = Path(original_filename).stem
-            # Try to grab product code like "MOL-02" near "manual" or "buku manual"
             m = re.search(r'(?i)(?:buku manual|manual book|user manual)\s+([A-Z0-9\-]+)', stem)
             if m and m.group(1):
                 product_name = m.group(1)
             else:
-                # Basic string cleanup
                 product_name = stem.split('.')[0]
                 if len(product_name) > 20:
                     product_name = product_name[:20].strip()
@@ -283,12 +240,12 @@ class BioArchitect:
         # ── Kiri atas: Nama Produk ───────────────────────────
         p_name = doc.add_paragraph()
         p_name.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p_name.paragraph_format.space_before = Pt(40)
+        p_name.paragraph_format.space_before = Pt(60)
         p_name.paragraph_format.space_after  = Pt(0)
         p_name.paragraph_format.first_line_indent = Pt(0)
         rn = p_name.add_run(product_name.upper())
         rn.font.name  = 'Arial'
-        rn.font.size  = Pt(50)
+        rn.font.size  = Pt(44)
         rn.font.bold  = True
         rn.font.color.rgb = self.COLOR_BLACK
 
@@ -301,47 +258,53 @@ class BioArchitect:
             p_desc.paragraph_format.first_line_indent = Pt(0)
             rd = p_desc.add_run(product_desc)
             rd.font.name  = 'Arial'
-            rd.font.size  = Pt(16)
+            rd.font.size  = Pt(14)
             rd.font.bold  = False
             rd.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
 
-        # ── Spasi besar di tengah ke bawah ────────────────────────────
-        for _ in range(25):  # lebih banyak spasi agar teks turun lebih rendah
+        # ── Spasi tengah (mendorong MANUAL BOOK ke bawah) ────
+        for _ in range(8):
             sp = doc.add_paragraph()
             sp.paragraph_format.first_line_indent = Pt(0)
             sp.paragraph_format.space_before = Pt(0)
             sp.paragraph_format.space_after  = Pt(0)
 
-        # ── Tengah: BUKU MANUAL ──────────────────────────────
+        # ── Kanan bawah: BUKU MANUAL / MANUAL BOOK ──────────
         p_bm = doc.add_paragraph()
-        p_bm.alignment = WD_ALIGN_PARAGRAPH.RIGHT  # tetap RIGHT
-        # Tambahkan spasi besar di atas untuk menurunkan judul ke bagian bawah halaman
-        p_bm.paragraph_format.space_before = Pt(300)
+        p_bm.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p_bm.paragraph_format.space_before = Pt(80)
         p_bm.paragraph_format.space_after = Pt(0)
         p_bm.paragraph_format.first_line_indent = Pt(0)
-        # Tingkatkan jarak kanan agar tidak menempel ke tepi
-        p_bm.paragraph_format.right_indent = Pt(60)
+        p_bm.paragraph_format.right_indent = Pt(40)
         
         rbm = p_bm.add_run("MANUAL BOOK" if lang == 'en' else "BUKU MANUAL")
         rbm.font.name  = 'Arial'
-        rbm.font.size  = Pt(50)
+        rbm.font.size  = Pt(44)
         rbm.font.bold  = True
         rbm.font.color.rgb = self.COLOR_BLACK
 
-        # ── Spasi menuju bawah (sisa ruang) ──────────────────────────────
-        for _ in range(5):  # UBAH INI: kurangi menjadi 5 karena sudah dipakai di atas
-            sp = doc.add_paragraph()
-            sp.paragraph_format.first_line_indent = Pt(0)
-            sp.paragraph_format.space_before = Pt(0)
-            sp.paragraph_format.space_after  = Pt(0)
-
-        # ── Bawah: Letterhead full-width ─────────────────────
+        # ── Bawah: Letterhead (hanya bagian gelombang + logo) ──────
         if self.letterhead_path:
             try:
-                # Lebar konten A4: 21cm - 3cm (kiri) - 2cm (kanan) = 16cm
+                from PIL import Image as PILImage
+                import io
+
+                # Buka gambar letterhead dan crop hanya bagian bawah (gelombang + logo)
+                img = PILImage.open(self.letterhead_path)
+                img_w, img_h = img.size
+                
+                # Ambil 30% bawah gambar (area gelombang biru + logo Elitech)
+                crop_top = int(img_h * 0.70)
+                cropped = img.crop((0, crop_top, img_w, img_h))
+                
+                # Simpan ke buffer memory (tidak perlu file sementara)
+                img_buffer = io.BytesIO()
+                cropped.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+
                 p_logo = doc.add_paragraph()
                 p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_logo.paragraph_format.space_before = Pt(0)
+                p_logo.paragraph_format.space_before = Pt(20)
                 p_logo.paragraph_format.space_after  = Pt(0)
                 p_logo.paragraph_format.first_line_indent = Pt(0)
 
@@ -350,7 +313,7 @@ class BioArchitect:
                 p_logo.paragraph_format.right_indent = Cm(-2.0)
 
                 p_logo.add_run().add_picture(
-                    self.letterhead_path,
+                    img_buffer,
                     width=Cm(21)   # lebar penuh A4
                 )
             except Exception as e:
@@ -558,7 +521,8 @@ class BioArchitect:
             text = item.get('normalized', '').strip()
             text_lower = text.lower() if text else ''
 
-            if item_type in ('title', 'heading'):
+            # Pertimbangkan heading, title, DAN paragraph pendek sebagai kandidat nama produk
+            if item_type in ('title', 'heading') or (item_type == 'paragraph' and len(text) < 50):
                 # Mark generic cover titles for exclusion
                 if text_lower in generic_titles or text_lower in cover_only_titles:
                     cover_item_indices.add(idx)
@@ -780,7 +744,18 @@ class BioArchitect:
         doc.save(word_path)
         logger.info(f"✓ Word file saved: {word_filename}")
 
+        # ── Konversi ke PDF ──────────────────────────────────────
+        pdf_filename = f"{safe_name}.pdf"
+        pdf_path = os.path.join(self.base_path, pdf_filename)
+        try:
+            from docx2pdf import convert
+            convert(word_path, pdf_path)
+            logger.info(f"✓ PDF file saved: {pdf_filename}")
+        except Exception as e:
+            logger.warning(f"⚠️ PDF conversion failed: {e}")
+            pdf_filename = None
+
         return {
             "word_file": word_filename,
-            "pdf_file":  None
+            "pdf_file":  pdf_filename
         }
