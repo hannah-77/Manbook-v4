@@ -152,6 +152,123 @@ def convert_pdf_to_images_safe(path):
     except Exception:
         return convert_from_path(path, dpi=dpi)
 
+
+def _split_columns_simple(image_path, filename_base):
+    """
+    Deteksi dan crop kolom pada halaman dokumen menggunakan whitespace analysis.
+    
+    Cara kerja (simple & reliable):
+      1. Convert ke grayscale → threshold → biner
+      2. Hitung vertical projection (jumlah pixel gelap per kolom-x)
+      3. Cari celah lebar (banyak pixel putih berturut-turut) → column gap
+      4. Crop setiap kolom → simpan sebagai file terpisah
+    
+    Returns: list of image paths (1 per column). Jika single-column → [original_path]
+    """
+    import cv2
+    import numpy as np
+    
+    img = cv2.imread(image_path)
+    if img is None:
+        return [image_path]
+    
+    h, w = img.shape[:2]
+    
+    # Minimum width untuk multi-column detection (dokumen kecil biasa 1 kolom)
+    if w < 800:
+        return [image_path]
+    
+    # Convert ke grayscale dan binarize
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    
+    # Vertical projection: hitung persentase pixel putih per kolom-x
+    # Ignore top 5% dan bottom 5% (header/footer biasanya full-width)
+    margin_y = int(h * 0.05)
+    roi = binary[margin_y:h - margin_y, :]
+    
+    # Untuk setiap kolom x, hitung berapa % pixel yang putih
+    white_ratio = np.mean(roi == 255, axis=0)  # array shape (w,)
+    
+    # Smooth dengan moving average untuk menghilangkan noise
+    kernel_size = max(5, w // 100)
+    kernel = np.ones(kernel_size) / kernel_size
+    white_smooth = np.convolve(white_ratio, kernel, mode='same')
+    
+    # Cari region yang "hampir semua putih" (> 95% putih) → column gap
+    # 95% lebih akurat dari 90% — menghindari false gap dari noise
+    gap_threshold = 0.95
+    is_gap = white_smooth > gap_threshold
+    
+    # Cari gap yang cukup lebar (minimal 1.5% dari lebar halaman)
+    min_gap_width = max(15, int(w * 0.015))
+    
+    # Find contiguous gap segments
+    gaps = []
+    in_gap = False
+    gap_start = 0
+    for x in range(w):
+        if is_gap[x] and not in_gap:
+            gap_start = x
+            in_gap = True
+        elif not is_gap[x] and in_gap:
+            gap_width = x - gap_start
+            if gap_width >= min_gap_width:
+                gap_center = gap_start + gap_width // 2
+                # Ignore gaps too close to edges (within 5% of page width)
+                if gap_center > w * 0.08 and gap_center < w * 0.92:
+                    gaps.append(gap_center)
+            in_gap = False
+    
+    if not gaps:
+        logger.info(f"📊 Column split: no column gaps found — single column")
+        return [image_path]
+    
+    # Build column boundaries
+    col_boundaries = [0] + sorted(gaps) + [w]
+    num_cols = len(col_boundaries) - 1
+    
+    # Sanity: max 6 columns (lebih dari itu kemungkinan noise)
+    if num_cols > 6:
+        logger.warning(f"📊 Too many columns detected ({num_cols}) — likely noise, skipping split")
+        return [image_path]
+    
+    logger.info(f"📊 Column split: detected {num_cols} columns (gaps at x={[int(g) for g in gaps]})")
+    
+    # Crop each column
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(backend_dir, "output_results")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    column_paths = []
+    for col_idx in range(num_cols):
+        col_x1 = int(col_boundaries[col_idx])
+        col_x2 = int(col_boundaries[col_idx + 1])
+        
+        # Small padding
+        pad = max(3, int(w * 0.003))
+        col_x1 = max(0, col_x1 - pad)
+        col_x2 = min(w, col_x2 + pad)
+        
+        # Skip very narrow columns (< 10% of page width — likely noise)
+        if (col_x2 - col_x1) < w * 0.10:
+            continue
+        
+        col_img = img[0:h, col_x1:col_x2]
+        
+        col_fname = f"COL_{filename_base}_c{col_idx + 1}.png"
+        col_path = os.path.join(output_dir, col_fname)
+        cv2.imwrite(col_path, col_img)
+        column_paths.append(col_path)
+        
+        logger.info(f"   Column {col_idx + 1}: x={col_x1}-{col_x2} ({col_x2-col_x1}px wide)")
+    
+    if len(column_paths) <= 1:
+        # Hanya 1 kolom valid → kembalikan original
+        return [image_path]
+    
+    return column_paths
+
 # ==========================================
 # API ENDPOINTS
 # ==========================================
@@ -515,6 +632,155 @@ def _detect_lang_from_text(text: str) -> dict:
     }
 
 
+def _detect_lang_with_ai(file_path: str, fname_lower: str) -> dict:
+    """
+    AI Vision fallback: send the first page of the document as an image
+    to the AI model and ask it to detect the language.
+    Used when text extraction yields too little text for statistical detection.
+    """
+    import base64
+
+    try:
+        from openrouter_client import get_openrouter_client
+        client = get_openrouter_client()
+        if not client.is_available:
+            logger.warning("AI lang-detect fallback: OpenRouter not available")
+            return None
+
+        # ── Convert first page to image ──
+        image_path = None
+        temp_images = []
+
+        if fname_lower.endswith('.pdf'):
+            # PDF → convert first page to image
+            try:
+                images = convert_pdf_to_images_safe(file_path)
+                if images:
+                    img_path = os.path.join(BASE_PATH, f"_langdetect_ai_page.png")
+                    images[0].save(img_path, "PNG")
+                    image_path = img_path
+                    temp_images.append(img_path)
+            except Exception as e:
+                logger.warning(f"AI lang-detect: PDF conversion failed: {e}")
+
+        elif fname_lower.endswith(('.docx', '.doc')):
+            # DOCX → convert to PDF first, then to image
+            try:
+                from docx2pdf import convert
+                import pythoncom
+                pythoncom.CoInitialize()
+                pdf_path = file_path + "._langdetect.pdf"
+                convert(file_path, pdf_path)
+                temp_images.append(pdf_path)
+                images = convert_pdf_to_images_safe(pdf_path)
+                if images:
+                    img_path = os.path.join(BASE_PATH, f"_langdetect_ai_page.png")
+                    images[0].save(img_path, "PNG")
+                    image_path = img_path
+                    temp_images.append(img_path)
+            except Exception as e:
+                logger.warning(f"AI lang-detect: DOCX→PDF conversion failed: {e}")
+
+        elif fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+            image_path = file_path
+
+        if not image_path or not os.path.exists(image_path):
+            logger.warning("AI lang-detect: no image available")
+            # Clean up temp files
+            for t in temp_images:
+                if os.path.exists(t):
+                    try: os.remove(t)
+                    except: pass
+            return None
+
+        # ── Encode image to base64 ──
+        # Resize to save tokens (max 800px wide)
+        img_cv = cv2.imread(image_path)
+        if img_cv is None:
+            for t in temp_images:
+                if os.path.exists(t):
+                    try: os.remove(t)
+                    except: pass
+            return None
+
+        h, w = img_cv.shape[:2]
+        if w > 800:
+            scale = 800 / w
+            img_cv = cv2.resize(img_cv, (800, int(h * scale)))
+
+        _, buffer = cv2.imencode('.jpg', img_cv, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        img_b64 = base64.b64encode(buffer).decode('utf-8')
+
+        # ── Ask AI to detect language ──
+        vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
+        old_model = client.model
+        client.model = vision_model
+
+        try:
+            prompt = """Look at this document page. What language is the main text written in?
+Respond with ONLY a JSON object, nothing else:
+{"lang": "id" or "en", "confidence": 0.0-1.0, "reason": "brief reason"}
+
+Use "id" for Bahasa Indonesia / Malay.
+Use "en" for English.
+If you see both languages, pick the DOMINANT one."""
+
+            response = client.call(prompt, image_base64=img_b64, timeout=20)
+
+            if not response:
+                return None
+
+            # Parse AI response
+            import re
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                logger.warning(f"AI lang-detect: no JSON in response: {response[:100]}")
+                return None
+
+            ai_result = json.loads(json_match.group())
+            detected = ai_result.get('lang', '').lower()
+
+            if detected not in ('id', 'en'):
+                logger.warning(f"AI lang-detect: unexpected lang '{detected}'")
+                return None
+
+            ai_conf = float(ai_result.get('confidence', 0.8))
+            reason = ai_result.get('reason', '')
+
+            if detected == 'id':
+                label = "Bahasa Indonesia"
+                flag = "🇮🇩"
+                message = f"{flag} Dokumen terdeteksi sebagai Bahasa Indonesia oleh AI Vision."
+            else:
+                label = "English"
+                flag = "🇬🇧"
+                message = f"{flag} Document detected as English by AI Vision."
+
+            logger.info(f"🧠 AI lang-detect: {detected} (conf={ai_conf}, reason={reason})")
+
+            return {
+                "detected": detected,
+                "confidence": round(ai_conf, 2),
+                "confidence_label": "AI Vision",
+                "label": label,
+                "message": message,
+                "ai_detected": True,
+                "ai_reason": reason,
+            }
+
+        finally:
+            client.model = old_model
+            # Clean up temp files
+            for t in temp_images:
+                if os.path.exists(t):
+                    try: os.remove(t)
+                    except: pass
+
+    except Exception as e:
+        logger.error(f"AI lang-detect fallback error: {e}")
+        return None
+
+
 @app.post("/detect-language")
 async def detect_language(file: UploadFile = File(...)):
     """
@@ -539,8 +805,20 @@ async def detect_language(file: UploadFile = File(...)):
         sample_text = _quick_extract_text(temp_path, fname_lower)
         logger.info(f"📝 LangDetect: extracted {len(sample_text)} chars from {file.filename}")
 
-        # Detect language
+        # Detect language (text-based)
         result = _detect_lang_from_text(sample_text)
+
+        # ── AI Vision Fallback: jika teks terlalu sedikit ──
+        if result.get("detected") is None:
+            logger.info("🧠 Text too short — trying AI Vision fallback...")
+            ai_result = _detect_lang_with_ai(temp_path, fname_lower)
+            if ai_result and ai_result.get("detected"):
+                ai_result["filename"] = file.filename
+                ai_result["sample_length"] = len(sample_text)
+                return ai_result
+            else:
+                logger.info("⚠️ AI Vision fallback juga gagal")
+
         result["filename"] = file.filename
         result["sample_length"] = len(sample_text)
 
@@ -677,85 +955,102 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 page_path = os.path.join(BASE_PATH, f"page_{i}.png")
                 img_src.save(page_path, "PNG")
 
-            # A. THE EYE (Scan) — pass language for OCR engine selection
-            scan_result = vision_module.scan_document(page_path, f"{file.filename}_{i}", lang=doc_language)
+            # ── Column detection: split multi-column pages ──
+            try:
+                col_paths = _split_columns_simple(page_path, f"{file.filename}_{i}")
+            except Exception as e:
+                logger.warning(f"Column split failed (non-fatal): {e}")
+                col_paths = [page_path]
 
-            # Handle return format
-            if isinstance(scan_result, list):
-                layout_elements = scan_result
-                clean_img_url = None
-            else:
-                layout_elements = scan_result.get('elements', [])
-                clean_path = scan_result.get('clean_image_path')
-                if clean_path and os.path.exists(clean_path):
-                    from urllib.parse import quote
-                    fname_base = os.path.basename(clean_path)
-                    clean_img_url = f"http://127.0.0.1:8000/output/{quote(fname_base)}"
-                    clean_pages_urls.append(clean_img_url)
-                    logger.info(f"📷 Preview page {current_page}: {clean_img_url}")
-                else:
-                    clean_img_url = None
+            if len(col_paths) > 1:
+                logger.info(f"📊 Page {current_page}: split into {len(col_paths)} columns")
 
-            # B. THE BRAIN (Classify + Normalize)
-            for element in layout_elements:
-                normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
-                # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
-                correction_result = apply_text_correction_with_highlights(
-                    normalized_result['corrected'], lang=doc_language
+            # ── Process each column (or full page if single column) ──
+            for col_idx, col_path in enumerate(col_paths):
+                col_suffix = f"_col{col_idx}" if len(col_paths) > 1 else ""
+
+                # A. THE EYE (Scan) — pass language for OCR engine selection
+                scan_result = vision_module.scan_document(
+                    col_path, f"{file.filename}_{i}{col_suffix}", lang=doc_language
                 )
-                corrected  = correction_result['text']
-                highlights = correction_result['highlights']
-                element['text'] = corrected
-                normalized_result['corrected'] = corrected
 
-                # Detect element language (from AI or auto-detect from text)
-                elem_lang = element.get('lang', '')
-                if not elem_lang:
-                    txt_lower = element['text'].lower()
-                    en_keywords = ['the', 'and', 'for', 'user', 'manual', 'this', 'with', 'installation',
-                                   'operation', 'maintenance', 'warning', 'caution', 'chapter',
-                                   'table', 'figure', 'if', 'is', 'are', 'can', 'not', 'may']
-                    en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
-                    elem_lang = 'en' if en_hits >= 2 else 'id'
-
-                # Use AI-provided chapter if available, else fallback to BioBrain
-                bab_id = element.get('chapter', '')
-                if bab_id and bab_id in chapter_titles:
-                    bab_title = chapter_titles[bab_id]
+                # Handle return format
+                if isinstance(scan_result, list):
+                    layout_elements = scan_result
+                    clean_img_url = None
                 else:
-                    bab_id, bab_title = brain_module.semantic_mapping(element)
+                    layout_elements = scan_result.get('elements', [])
+                    clean_path = scan_result.get('clean_image_path')
+                    if clean_path and os.path.exists(clean_path):
+                        from urllib.parse import quote
+                        fname_base = os.path.basename(clean_path)
+                        clean_img_url = f"http://127.0.0.1:8000/output/{quote(fname_base)}"
+                        clean_pages_urls.append(clean_img_url)
+                        col_label = f"page {current_page} col {col_idx+1}" if len(col_paths) > 1 else f"page {current_page}"
+                        logger.info(f"📷 Preview {col_label}: {clean_img_url}")
+                    else:
+                        clean_img_url = None
 
-                # Remap BAB→Chapter or Chapter→BAB based on selected language
-                if doc_language == 'en' and bab_id.startswith('BAB '):
-                    bab_num = bab_id.replace('BAB ', '')
-                    new_key = f"Chapter {bab_num}"
-                    if new_key in chapter_titles:
-                        bab_id = new_key
-                        bab_title = chapter_titles[new_key]
-                elif doc_language == 'id' and bab_id.startswith('Chapter '):
-                    bab_num = bab_id.replace('Chapter ', '')
-                    new_key = f"BAB {bab_num}"
-                    if new_key in chapter_titles:
-                        bab_id = new_key
-                        bab_title = chapter_titles[new_key]
+                # B. THE BRAIN (Classify + Normalize) — per column
+                for element in layout_elements:
+                    normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
+                    # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
+                    correction_result = apply_text_correction_with_highlights(
+                        normalized_result['corrected'], lang=doc_language
+                    )
+                    corrected  = correction_result['text']
+                    highlights = correction_result['highlights']
+                    element['text'] = corrected
+                    normalized_result['corrected'] = corrected
 
-                structured_data.append({
-                    "chapter_id"    : bab_id,
-                    "chapter_title" : bab_title,
-                    "type"          : element['type'],
-                    "original"      : normalized_result['original'],
-                    "normalized"    : normalized_result['corrected'],
-                    "typos"         : normalized_result['typos'],
-                    "has_typo"      : normalized_result['has_typo'],
-                    "text_confidence": element.get('confidence', 1.0),
-                    "match_score"   : 100,
-                    "lang"          : elem_lang,
-                    "crop_url"      : element.get('crop_url'),
-                    "crop_local"    : element.get('crop_local'),
-                    "source_image_local": element.get('source_image_local'),
-                    "bbox"          : element.get('bbox'),
-                    "highlights"    : highlights,   # ← NEW: kata meragukan
-                })
+                    # Detect element language (from AI or auto-detect from text)
+                    elem_lang = element.get('lang', '')
+                    if not elem_lang:
+                        txt_lower = element['text'].lower()
+                        en_keywords = ['the', 'and', 'for', 'user', 'manual', 'this', 'with', 'installation',
+                                       'operation', 'maintenance', 'warning', 'caution', 'chapter',
+                                       'table', 'figure', 'if', 'is', 'are', 'can', 'not', 'may']
+                        en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
+                        elem_lang = 'en' if en_hits >= 2 else 'id'
+
+                    # Use AI-provided chapter if available, else fallback to BioBrain
+                    bab_id = element.get('chapter', '')
+                    if bab_id and bab_id in chapter_titles:
+                        bab_title = chapter_titles[bab_id]
+                    else:
+                        bab_id, bab_title = brain_module.semantic_mapping(element)
+
+                    # Remap BAB→Chapter or Chapter→BAB based on selected language
+                    if doc_language == 'en' and bab_id.startswith('BAB '):
+                        bab_num = bab_id.replace('BAB ', '')
+                        new_key = f"Chapter {bab_num}"
+                        if new_key in chapter_titles:
+                            bab_id = new_key
+                            bab_title = chapter_titles[new_key]
+                    elif doc_language == 'id' and bab_id.startswith('Chapter '):
+                        bab_num = bab_id.replace('Chapter ', '')
+                        new_key = f"BAB {bab_num}"
+                        if new_key in chapter_titles:
+                            bab_id = new_key
+                            bab_title = chapter_titles[new_key]
+
+                    structured_data.append({
+                        "chapter_id"    : bab_id,
+                        "chapter_title" : bab_title,
+                        "type"          : element['type'],
+                        "original"      : normalized_result['original'],
+                        "normalized"    : normalized_result['corrected'],
+                        "typos"         : normalized_result['typos'],
+                        "has_typo"      : normalized_result['has_typo'],
+                        "text_confidence": element.get('confidence', 1.0),
+                        "match_score"   : 100,
+                        "lang"          : elem_lang,
+                        "crop_url"      : element.get('crop_url'),
+                        "crop_local"    : element.get('crop_local'),
+                        "source_image_local": element.get('source_image_local'),
+                        "bbox"          : element.get('bbox'),
+                        "highlights"    : highlights,
+                    })
 
             # Cleanup temp page image
             # We skip this if we need it, but actually the vision_engine saves a PREVIEW image.
@@ -770,30 +1065,104 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                         time.sleep(0.5)
                     except Exception:
                         pass
-        # ── STEP 2.6: Mark Cover Page Items ─────────────────────────
-        # Items in BAB 1 / Chapter 1 that are short heading/title elements
-        # are actually cover page text (product name, company, generic titles).
-        # Mark them so frontend displays them as cover and export skips them.
-        cover_generic = {'user manual', 'manual book', 'buku manual', 'operating manual',
-                         'instruction manual', 'table of contents', 'daftar isi', 'cover',
-                         'introduction', 'pendahuluan', 'kata pengantar', 'preface',
-                         'petunjuk pengguna', 'petunjuk pemakaian', 'user guide',
-                         'owner manual', 'service manual', 'manual pengguna', 'panduan pengguna'}
-        first_chapter = "Chapter 1" if doc_language == 'en' else "BAB 1"
-        cover_count = 0
-        for item in structured_data:
-            if item.get('chapter_id') != first_chapter:
-                continue
-            if item.get('type') in ('title', 'heading'):
-                text = (item.get('normalized', '') or '').strip()
-                text_lower = text.lower()
-                # Mark as cover if: generic title, or short heading (< 40 chars, likely product/brand name)
-                if text_lower in cover_generic or (len(text) < 40 and cover_count < 4):
-                    item['is_cover'] = True
-                    cover_count += 1
+        # ── STEP 2.6: AI Cover Page Extraction ─────────────────────────
+        # Extract product name & description strictly from the first page (cover) using AI
+        first_page_image_path = None
+        for img in clean_pages_urls:
+            filename = img.split('/')[-1]
+            local_path = os.path.join(OUTPUT_DIR, filename)
+            if "_0.png" in filename and os.path.exists(local_path):
+                first_page_image_path = local_path
+                break
+        
+        if not first_page_image_path and images and isinstance(images[0], str):
+            first_page_image_path = images[0]
+            
+        cover_ai_result = None
+        if first_page_image_path:
+            logger.info(f"🤖 Calling AI to analyze Cover Page from: {first_page_image_path}")
+            try:
+                from openrouter_client import get_openrouter_client
+                import base64
+                
+                client = get_openrouter_client()
+                if client and client.is_available:
+                    # Convert to base64
+                    img_cv = cv2.imread(first_page_image_path)
+                    if img_cv is not None:
+                        h, w = img_cv.shape[:2]
+                        if w > 1000:
+                            scale = 1000 / w
+                            img_cv = cv2.resize(img_cv, (1000, int(h * scale)))
+                        _, buffer = cv2.imencode('.jpg', img_cv, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        img_b64 = base64.b64encode(buffer).decode('utf-8')
+                        
+                        vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
+                        old_model = client.model
+                        client.model = vision_model
+                        
+                        prompt = """Analyze this document cover page. I need exactly 2 strings:
+1. The Product Name (usually the biggest, boldest text, often a short code like "SP10W" or "Spirometer").
+2. The Company Name or short description (e.g. "Contec Medical Systems Co., Ltd.").
 
-        if cover_count > 0:
-            logger.info(f"📋 Marked {cover_count} items as cover page elements")
+Respond ONLY with a valid pure JSON object in this exact format, with NO markdown formatting:
+{"product_name": "...", "description": "..."}"""
+
+                        response = client.call(prompt, image_base64=img_b64, timeout=20)
+                        client.model = old_model
+                        
+                        if response:
+                            import re
+                            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                            if json_match:
+                                cover_ai_result = json.loads(json_match.group())
+                                logger.info(f"✅ AI Cover Result: {cover_ai_result}")
+            except Exception as e:
+                logger.error(f"AI Cover Extraction failed: {e}")
+
+        # Remove previous heuristic cover marking. If AI succeeded, inject it explicitly.
+        first_chapter = "Chapter 1" if doc_language == 'en' else "BAB 1"
+        first_chapter_title = chapter_titles.get(first_chapter, "")
+        
+        if cover_ai_result and cover_ai_result.get("product_name"):
+            # Inject at the very beginning
+            structured_data.insert(0, {
+                "chapter_id": first_chapter,
+                "chapter_title": first_chapter_title,
+                "type": "heading",
+                "original": cover_ai_result["product_name"],
+                "normalized": cover_ai_result["product_name"],
+                "is_cover": True,
+                "has_typo": False,
+                "text_confidence": 1.0,
+                "match_score": 100
+            })
+            if cover_ai_result.get("description"):
+                structured_data.insert(1, {
+                    "chapter_id": first_chapter,
+                    "chapter_title": first_chapter_title,
+                    "type": "paragraph",
+                    "original": cover_ai_result["description"],
+                    "normalized": cover_ai_result["description"],
+                    "is_cover": True,
+                    "has_typo": False,
+                    "text_confidence": 1.0,
+                    "match_score": 100
+                })
+        else:
+            # Fallback to extremely strict heuristic just in case AI fails
+            cover_count = 0
+            for item in structured_data:
+                if item.get('chapter_id') != first_chapter:
+                    continue
+                if cover_count >= 2:
+                    break
+                if item.get('type') in ('title', 'heading'):
+                    text = (item.get('normalized', '') or '').strip()
+                    is_first_page = f"{file.filename}_0" in item.get('source_image_local', '')
+                    if is_first_page and len(text) < 40 and not any(kw in text.lower() for kw in ('manual', 'table of contents')):
+                        item['is_cover'] = True
+                        cover_count += 1
 
         # 2.7 CHECK MISSING CHAPTERS (Report only — no auto-generation)
         existing_chapters = set(item['chapter_id'] for item in structured_data)
@@ -852,6 +1221,164 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                  "structured_data": structured_data,
                  "images_count": len(images) if 'images' in locals() else 0
              }
+
+
+# ==========================================
+# TRANSLATE ENDPOINT
+# ==========================================
+@app.post("/translate/{session_id}")
+async def translate_session(session_id: str):
+    """
+    Translate semua teks dalam session dari English → Bahasa Indonesia.
+    Menggunakan OpenRouter AI untuk terjemahan yang akurat.
+    Setelah translate, regenerate Word/PDF dengan teks terjemahan.
+    """
+    if session_id not in active_sessions:
+        return {"success": False, "error": "Session not found"}
+    
+    session = active_sessions[session_id]
+    structured_data = session.get("structured_data", [])
+    
+    if not structured_data:
+        return {"success": False, "error": "No data to translate"}
+    
+    try:
+        from openrouter_client import get_openrouter_client
+        client = get_openrouter_client()
+        
+        if not client.is_available:
+            return {"success": False, "error": "AI not available — check OPENROUTER_API_KEY in .env"}
+        
+        logger.info(f"🌐 Translation started for session {session_id}: {len(structured_data)} items")
+        
+        # Kumpulkan teks yang perlu ditranslate (hanya heading & paragraph, bukan table/figure)
+        texts_to_translate = []
+        for idx, item in enumerate(structured_data):
+            if item.get('type') in ('heading', 'paragraph') and item.get('normalized'):
+                texts_to_translate.append((idx, item['normalized']))
+        
+        if not texts_to_translate:
+            return {"success": False, "error": "No text elements to translate"}
+        
+        logger.info(f"🌐 Translating {len(texts_to_translate)} text elements...")
+        
+        # Batch translate: kirim maks 10 teks per API call untuk efisiensi
+        BATCH_SIZE = 10
+        translated_count = 0
+        
+        for batch_start in range(0, len(texts_to_translate), BATCH_SIZE):
+            batch = texts_to_translate[batch_start:batch_start + BATCH_SIZE]
+            
+            # Siapkan teks untuk batch
+            numbered_texts = []
+            for i, (idx, text) in enumerate(batch):
+                numbered_texts.append(f"[{i+1}] {text}")
+            
+            batch_text = "\n\n".join(numbered_texts)
+            
+            prompt = f"""Translate the following English texts to Bahasa Indonesia.
+Each text is numbered [1], [2], etc. Return translations with the same numbering.
+
+RULES:
+- Translate naturally and accurately to Bahasa Indonesia
+- Keep technical terms that are commonly used in English (e.g., "display", "sensor", "battery")
+- Keep product names, model numbers, and brand names as-is
+- Keep measurement units as-is (e.g., "mL", "mmHg", "°C")
+- Maintain the same formatting (headings stay as headings)
+- Return ONLY the translations with numbering, nothing else
+
+Texts to translate:
+{batch_text}"""
+            
+            response = client.call(prompt, timeout=60)
+            
+            if response:
+                # Parse response — match [1], [2], etc.
+                lines = response.strip().split('\n')
+                current_num = None
+                current_text = []
+                translations = {}
+                
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check if line starts with [N]
+                    import re
+                    match = re.match(r'^\[(\d+)\]\s*(.*)', line)
+                    if match:
+                        # Save previous
+                        if current_num is not None and current_text:
+                            translations[current_num] = ' '.join(current_text)
+                        current_num = int(match.group(1))
+                        current_text = [match.group(2)] if match.group(2) else []
+                    elif current_num is not None:
+                        current_text.append(line)
+                
+                # Save last one
+                if current_num is not None and current_text:
+                    translations[current_num] = ' '.join(current_text)
+                
+                # Apply translations back to structured_data
+                for i, (idx, original_text) in enumerate(batch):
+                    batch_num = i + 1
+                    if batch_num in translations:
+                        translated = translations[batch_num].strip()
+                        if translated:
+                            structured_data[idx]['original_en'] = structured_data[idx].get('normalized', '')
+                            structured_data[idx]['normalized'] = translated
+                            structured_data[idx]['lang'] = 'id'
+                            structured_data[idx]['translated'] = True
+                            translated_count += 1
+                
+                logger.info(f"🌐 Batch {batch_start//BATCH_SIZE + 1}: "
+                           f"translated {len(translations)}/{len(batch)} items")
+            else:
+                logger.warning(f"🌐 Batch {batch_start//BATCH_SIZE + 1}: AI returned empty response")
+        
+        logger.info(f"✅ Translation complete: {translated_count}/{len(texts_to_translate)} items translated")
+        
+        # ── Remap chapter IDs & titles to Indonesian ──
+        chapter_en_to_id = {
+            "Chapter 1": ("BAB 1", "Tujuan Penggunaan & Keamanan"),
+            "Chapter 2": ("BAB 2", "Instalasi"),
+            "Chapter 3": ("BAB 3", "Panduan Operasional & Pemantauan Klinis"),
+            "Chapter 4": ("BAB 4", "Perawatan, Pemeliharaan & Pembersihan"),
+            "Chapter 5": ("BAB 5", "Pemecahan Masalah"),
+            "Chapter 6": ("BAB 6", "Spesifikasi Teknis & Kepatuhan Standar"),
+            "Chapter 7": ("BAB 7", "Garansi & Layanan"),
+        }
+        for item in structured_data:
+            ch_id = item.get('chapter_id', '')
+            if ch_id in chapter_en_to_id:
+                new_id, new_title = chapter_en_to_id[ch_id]
+                item['chapter_id'] = new_id
+                item['chapter_title'] = new_title
+        
+        logger.info("🌐 Chapter IDs remapped: Chapter → BAB")
+        
+        # Update session
+        session["structured_data"] = structured_data
+        
+        # Regenerate Word/PDF with translated text
+        result = architect_module.build_report(structured_data, session["original_filename"], lang='id')
+        word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
+        pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result.get('pdf_file') else None
+        
+        return {
+            "success": True,
+            "translated_count": translated_count,
+            "total_items": len(texts_to_translate),
+            "results": structured_data,
+            "word_url": word_url,
+            "pdf_url": pdf_url,
+        }
+    
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 @app.post("/supplement/{session_id}")
 async def supplement_workflow(

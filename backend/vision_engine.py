@@ -1,12 +1,19 @@
 """
-HYBRID VISION PIPELINE v6 — Tesseract + PPStructure + AI
+HYBRID VISION PIPELINE v7 — Surya + Tesseract + AI
 ============================================================
 
 Strategy (3-stage pipeline):
-  Stage 1: PPStructure    → Layout detection (text / table / figure regions)
-  Stage 2: Tesseract OCR  → Text extraction per region (PRIMARY, with lang packs)
-           PaddleOCR      → Fallback if Tesseract unavailable
-  Stage 3: AI (Gemini)    → Chapter classification (TEXT-ONLY, no image = cheap & fast)
+  Stage 1: Surya           → Layout detection (text / table / figure / heading regions)
+  Stage 2: PaddleOCR       → English text extraction (PRIMARY for English)
+           Tesseract OCR   → Indonesian text extraction (PRIMARY for Indonesian, lang pack 'ind')
+           Each falls back to the other if the primary engine fails
+  Stage 3: AI (Gemini)     → Chapter classification (TEXT-ONLY, no image = cheap & fast)
+
+Why Surya (replaces PPStructure):
+  - More accurate layout classification (Section-header, Text, Table, Figure, etc.)
+  - Better at distinguishing tables vs figures vs text
+  - Provides reading order detection
+  - Supports 90+ languages
 
 Why Tesseract:
   - Has dedicated Indonesian language pack (`ind`) = far fewer typos
@@ -14,7 +21,7 @@ Why Tesseract:
   - Industry standard OCR used by Google, Adobe, Microsoft
   - Fast and reliable for printed text
 
-Updated: February 2026
+Updated: March 2026
 """
 
 import os
@@ -25,7 +32,32 @@ import json
 import re
 import base64
 
-from paddleocr import PaddleOCR, PPStructure
+# ── NumPy 2.0 compatibility shim ──
+# PaddleOCR uses np.sctypes which was removed in NumPy 2.0.
+# Monkey-patch it back so PaddleOCR can import without errors.
+if not hasattr(np, 'sctypes'):
+    np.sctypes = {
+        'int':     [np.int8, np.int16, np.int32, np.int64],
+        'uint':    [np.uint8, np.uint16, np.uint32, np.uint64],
+        'float':   [np.float16, np.float32, np.float64],
+        'complex': [np.complex64, np.complex128],
+        'others':  [bool, object, bytes, str, np.void],
+    }
+
+# ⚠️ CRITICAL: Import torch/surya BEFORE paddleocr on Windows to prevent DLL Hell (WinError 127)
+# Surya Layout Detection (replaces PPStructure)
+try:
+    import torch  # Pre-load torch DLLs safely
+    from PIL import Image as PILImage
+    from surya.foundation import FoundationPredictor
+    from surya.layout import LayoutPredictor
+    from surya.settings import settings as surya_settings
+    SURYA_AVAILABLE = True
+except ImportError as _surya_err:
+    SURYA_AVAILABLE = False
+    logging.warning(f"⚠️ Surya not available: {_surya_err}. Layout detection will be limited.")
+
+from paddleocr import PaddleOCR
 from dotenv import load_dotenv
 
 # Tesseract OCR (PRIMARY)
@@ -92,20 +124,21 @@ class BioVisionHybrid:
     def __init__(self):
         """
         Initialize the 3-stage hybrid pipeline:
-        1. PPStructure  → layout detection
-        2. PaddleOCR    → text extraction
-        3. AI           → chapter classification (text-only)
+        1. Surya         → layout detection (replaces PPStructure)
+        2. PaddleOCR     → text extraction
+        3. AI            → chapter classification (text-only)
         """
-        # ── Stage 1: Layout Engine ──
-        logger.info("Initializing PPStructure (layout detection)...")
-        self.layout_engine = PPStructure(
-            show_log=False,
-            image_orientation=False,
-            layout=True,
-            table=True,
-            ocr=False,       # We do OCR separately with PaddleOCR
-            recovery=False
-        )
+        # ── Stage 1: Surya Layout Engine ──
+        if SURYA_AVAILABLE:
+            logger.info("Initializing Surya Layout Predictor...")
+            self._surya_foundation = FoundationPredictor(
+                checkpoint=surya_settings.LAYOUT_MODEL_CHECKPOINT
+            )
+            self.layout_engine = LayoutPredictor(self._surya_foundation)
+            logger.info("✓ Surya Layout Predictor: Ready")
+        else:
+            logger.warning("⚠️ Surya not available — layout detection will be limited")
+            self.layout_engine = None
 
         # ── Stage 2: OCR Engines ──
         # INDONESIAN: Tesseract OCR (lang pack 'ind')
@@ -122,7 +155,7 @@ class BioVisionHybrid:
             show_log=False
         )
 
-        logger.info("✓ Hybrid Vision Pipeline v6 Ready")
+        logger.info("✓ Hybrid Vision Pipeline v7 (Surya + Tesseract/PaddleOCR) Ready")
 
     # ═══════════════════════════════════════════════════════════════
     # HELPER: Detect Bordered Boxes (letterheads, company headers)
@@ -179,38 +212,194 @@ class BioVisionHybrid:
 
         return bordered
 
+    def _has_grid_lines(self, image_cv, bbox):
+        """
+        Check if a region contains table-like grid lines (horizontal + vertical).
+        Uses morphological operations to isolate line structures.
+        Returns True if the region looks like a table.
+        """
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            h_img, w_img = image_cv.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w_img, x2), min(h_img, y2)
+
+            crop = image_cv[y1:y2, x1:x2]
+            if crop.size == 0:
+                return False
+
+            ch, cw = crop.shape[:2]
+            if ch < 20 or cw < 20:
+                return False
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+            # Detect horizontal lines (long horizontal structures)
+            h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, cw // 4), 1))
+            h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
+            h_line_pixels = cv2.countNonZero(h_lines)
+
+            # Detect vertical lines (long vertical structures)
+            v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(15, ch // 6)))
+            v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
+            v_line_pixels = cv2.countNonZero(v_lines)
+
+            total_pixels = ch * cw or 1
+            h_ratio = h_line_pixels / total_pixels
+            v_ratio = v_line_pixels / total_pixels
+
+            # Table = has both horizontal AND vertical lines (grid)
+            # OR has strong horizontal lines (borderless tables with row separators)
+            has_h = h_ratio > 0.005  # at least 0.5% of pixels are horizontal lines
+            has_v = v_ratio > 0.003  # at least 0.3% are vertical lines
+
+            # Count distinct horizontal lines (by projecting)
+            h_projection = np.sum(h_lines > 0, axis=1)  # per row
+            h_line_rows = np.sum(h_projection > cw * 0.15)  # rows with significant horizontal line
+
+            is_table = (has_h and has_v) or (h_line_rows >= 3)
+
+            logger.debug(
+                f"GridCheck bbox={bbox}: h_ratio={h_ratio:.4f}, v_ratio={v_ratio:.4f}, "
+                f"h_lines={h_line_rows}, is_table={is_table}"
+            )
+            return is_table
+
+        except Exception as e:
+            logger.warning(f"Grid line detection error: {e}")
+            return False
+
+    def _is_visual_content(self, image_cv, bbox):
+        """
+        Check if a region contains visual content (images, diagrams, photos)
+        vs just text on white background.
+        Uses edge density and color variance analysis.
+        Returns True if the region looks like an image/diagram.
+        """
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            h_img, w_img = image_cv.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w_img, x2), min(h_img, y2)
+
+            crop = image_cv[y1:y2, x1:x2]
+            if crop.size == 0:
+                return False
+
+            ch, cw = crop.shape[:2]
+            if ch < 20 or cw < 20:
+                return False
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+            # 1. Edge density: images/diagrams have many edges scattered around
+            edges = cv2.Canny(gray, 50, 150)
+            edge_ratio = cv2.countNonZero(edges) / (ch * cw)
+
+            # 2. Color variance: photos/diagrams have high color variance,
+            #    plain text on white has low variance
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            s_channel = hsv[:, :, 1]  # Saturation
+            color_var = float(np.std(s_channel))
+
+            # 3. White ratio: text pages are mostly white (>60%)
+            white_pixels = np.sum(gray > 220)
+            white_ratio = white_pixels / (ch * cw)
+
+            # Visual content: high edges + either colorful or not mostly white
+            is_visual = (
+                (edge_ratio > 0.08 and white_ratio < 0.65)  # Dense edges, not plain text
+                or (color_var > 30)                           # Colorful content
+                or (edge_ratio > 0.12)                        # Very high edge density (diagrams)
+            )
+
+            logger.debug(
+                f"VisualCheck bbox={bbox}: edge_ratio={edge_ratio:.3f}, "
+                f"color_var={color_var:.1f}, white_ratio={white_ratio:.2f}, "
+                f"is_visual={is_visual}"
+            )
+            return is_visual
+
+        except Exception as e:
+            logger.warning(f"Visual content detection error: {e}")
+            return False
+
     # ═══════════════════════════════════════════════════════════════
-    # STAGE 1: Layout Detection (PPStructure + bordered-box detection)
+    # STAGE 1: Layout Detection (Surya + bordered-box detection)
     # ═══════════════════════════════════════════════════════════════
+
+    # Mapping from Surya labels to our internal types
+    SURYA_LABEL_MAP = {
+        # → heading
+        'section-header': 'heading',
+        'title':          'heading',
+        # → paragraph
+        'text':           'paragraph',
+        'text-inline-math': 'paragraph',
+        'list-item':      'paragraph',
+        'caption':        'paragraph',
+        'footnote':       'paragraph',
+        'handwriting':    'paragraph',
+        'form':           'paragraph',
+        # → table
+        'table':          'table',
+        'table-of-contents': 'table',
+        # → figure
+        'figure':         'figure',
+        'picture':        'figure',
+        'formula':        'figure',
+        # → skip (not useful for manual book content)
+        'page-header':    '_skip',
+        'page-footer':    '_skip',
+    }
+
     def _detect_layout(self, image_cv):
         """
-        Detect page regions using PPStructure.
-        Before handing off to PPStructure, we first detect bordered rectangles
-        (letterheads, company boxes) via OpenCV — those are marked as 'table'
-        type so they get cropped as images, not OCR'd line by line.
+        Detect page regions using Surya Layout Predictor.
+        Surya provides richer labels and more accurate classification than PPStructure.
 
-        Returns list of {"type": str, "bbox": [x1,y1,x2,y2]}
+        Falls back to bordered-box detection + full-page if Surya not available.
+
+        Returns list of {"type": str, "bbox": [x1,y1,x2,y2], "position": int}
         Types: heading, paragraph, table, figure
         """
         h, w = image_cv.shape[:2]
 
-        # ── PRE-PASS: Detect bordered boxes with OpenCV ──────────
-        bordered_boxes = self._detect_bordered_boxes(image_cv)
-        # We'll use these to override PPStructure results later
+        if not SURYA_AVAILABLE or self.layout_engine is None:
+            logger.warning("⚠️ Surya not available — returning full-page as single region")
+            return [{"type": "paragraph", "bbox": [0, 0, w, h], "position": 0}]
 
         try:
-            results = self.layout_engine(image_cv)
-            if not results:
+            # Convert cv2 (BGR numpy) → PIL Image (RGB) for Surya
+            rgb = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
+            pil_img = PILImage.fromarray(rgb)
+
+            # Run Surya layout prediction
+            predictions = self.layout_engine([pil_img])
+
+            if not predictions or len(predictions) == 0:
+                logger.warning("⚠️ Surya returned no predictions")
                 return []
 
-            # Sort top-to-bottom (reading order)
-            results.sort(key=lambda x: x['bbox'][1])
+            page_pred = predictions[0]  # First (only) image
+            bboxes = page_pred.bboxes if hasattr(page_pred, 'bboxes') else []
+
+            if not bboxes:
+                logger.warning("⚠️ Surya found no layout elements")
+                return []
 
             regions = []
-            for r in results:
-                r.pop('img', None)    # Free memory
-                bbox = r['bbox']
-                rtype = r['type'].lower()
+            label_counts = {}  # For logging
+
+            for item in bboxes:
+                # Surya bbox: item.bbox = [x1, y1, x2, y2]
+                bbox = item.bbox if hasattr(item, 'bbox') else None
+                label = (item.label if hasattr(item, 'label') else 'text').lower()
+                position = item.position if hasattr(item, 'position') else 0
+
+                if bbox is None:
+                    continue
 
                 x1, y1, x2, y2 = [int(v) for v in bbox]
                 x1, y1 = max(0, x1), max(0, y1)
@@ -219,44 +408,43 @@ class BioVisionHybrid:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                # Skip tiny regions (likely noise)
+                # Skip tiny regions (noise)
                 area = (x2 - x1) * (y2 - y1)
                 if area < 200:
                     continue
 
-                # Normalize PPStructure types to our standard types
-                if rtype in ('title', 'header'):
-                    rtype = 'heading'
-                elif rtype in ('text', 'reference', 'list'):
-                    rtype = 'paragraph'
-                elif rtype == 'table':
-                    rtype = 'table'
-                elif rtype in ('figure', 'equation'):
-                    rtype = 'figure'
-                else:
-                    rtype = 'paragraph'
+                # Map Surya label to our internal type
+                rtype = self.SURYA_LABEL_MAP.get(label, 'paragraph')
+
+                # Skip page headers/footers (not relevant for manual book content)
+                if rtype == '_skip':
+                    continue
+
+                # Track label counts for logging
+                label_counts[label] = label_counts.get(label, 0) + 1
 
                 regions.append({
                     "type": rtype,
-                    "bbox": [x1, y1, x2, y2]
+                    "bbox": [x1, y1, x2, y2],
+                    "position": position,
+                    "surya_label": label,  # Keep original for debugging
                 })
 
-            # ── OVERRIDE: Merge PPStructure sub-regions inside bordered boxes ──
-            # If OpenCV detected a bordered rectangle (e.g. company letterhead),
-            # any PPStructure regions that fall inside it are REMOVED and replaced
-            # by the single bordered box as a 'table' type (will be cropped as image).
+            # Sort by Surya's reading order (position), fallback to top-to-bottom
+            regions.sort(key=lambda r: (r.get('position', 0), r['bbox'][1]))
+
+            # ── PRE-PASS: Detect bordered boxes with OpenCV ──────────
+            bordered_boxes = self._detect_bordered_boxes(image_cv)
+
+            # ── OVERRIDE: Bordered boxes → table if has grid lines ──
             if bordered_boxes:
-                # For each bordered box, check which PPStructure regions it contains
                 final_regions = []
                 covered_indices = set()
 
                 for bx1, by1, bx2, by2 in bordered_boxes:
-                    # Find all PPStructure regions that overlap significantly
-                    # with this border box
                     inside = []
                     for idx, region in enumerate(regions):
                         rx1, ry1, rx2, ry2 = region['bbox']
-                        # Compute overlap
                         ox1 = max(bx1, rx1)
                         oy1 = max(by1, ry1)
                         ox2 = min(bx2, rx2)
@@ -268,48 +456,37 @@ class BioVisionHybrid:
                                 inside.append(idx)
 
                     if inside:
-                        # Replace all sub-regions with one bordered box region
-                        for idx in inside:
-                            covered_indices.add(idx)
-                        final_regions.append({"type": "table", "bbox": [bx1, by1, bx2, by2]})
-                        logger.info(
-                            f"📦 BorderBox override: merged {len(inside)} sub-regions "
-                            f"at y={by1}-{by2} → single 'table' crop"
+                        is_real_table = self._has_grid_lines(
+                            image_cv, [bx1, by1, bx2, by2]
                         )
+                        if is_real_table:
+                            for idx in inside:
+                                covered_indices.add(idx)
+                            final_regions.append({
+                                "type": "table", "bbox": [bx1, by1, bx2, by2],
+                                "position": 0, "surya_label": "bordered-table"
+                            })
+                            logger.info(
+                                f"📦 BorderBox → TABLE at y={by1}-{by2} "
+                                f"(grid lines confirmed)"
+                            )
 
-                # Add remaining PPStructure regions not inside any border
                 for idx, region in enumerate(regions):
                     if idx not in covered_indices:
                         final_regions.append(region)
 
-                # Sort by vertical position
-                final_regions.sort(key=lambda r: r['bbox'][1])
+                final_regions.sort(key=lambda r: (r.get('position', 0), r['bbox'][1]))
                 regions = final_regions
 
-            # ── Aspect-ratio heuristic (secondary pass) ──────────────────
-            # Catches wide/short text regions that still look like boxes
-            # but don't have a visible border OpenCV could detect.
-            for region in regions:
-                if region['type'] in ('table', 'figure'):
-                    continue
-                rx1, ry1, rx2, ry2 = region['bbox']
-                rw = rx2 - rx1
-                rh = ry2 - ry1
-                if rh == 0:
-                    continue
-                aspect    = rw / rh
-                width_pct = rw / w
-                top_pct   = ry1 / h
-
-                if aspect >= 4.0 and width_pct >= 0.5 and top_pct <= 0.40:
-                    region['type'] = 'table'
-                    logger.info(f"📦 AspectHeuristic: promoted region y={ry1} "
-                                f"to 'table' (aspect={aspect:.1f}, w={width_pct:.0%})")
-
-            logger.info(f"📐 Layout: {len(regions)} regions "
-                        f"({sum(1 for r in regions if r['type'] == 'heading')} headings, "
-                        f"{sum(1 for r in regions if r['type'] == 'table')} tables, "
-                        f"{sum(1 for r in regions if r['type'] == 'figure')} figures)")
+            # Log summary
+            surya_labels_str = ', '.join(f"{k}={v}" for k, v in sorted(label_counts.items()))
+            logger.info(
+                f"📐 Surya Layout: {len(regions)} regions "
+                f"({sum(1 for r in regions if r['type'] == 'heading')} headings, "
+                f"{sum(1 for r in regions if r['type'] == 'table')} tables, "
+                f"{sum(1 for r in regions if r['type'] == 'figure')} figures) "
+                f"[Surya labels: {surya_labels_str}]"
+            )
             return regions
 
         except Exception as e:
@@ -402,10 +579,9 @@ class BioVisionHybrid:
     def _extract_text(self, image_cv, bbox, lang='en'):
         """
         Extract text from a specific region.
-        OCR engine is selected STRICTLY based on language:
+        OCR engine is selected STRICTLY based on language (NO fallback):
+          'en' → PaddleOCR (English model)
           'id' → Tesseract OCR (Indonesian lang pack 'ind')
-                 Fallback to PaddleOCR if Tesseract not installed
-          'en' → PaddleOCR ONLY (English model)
 
         Region is padded slightly on all sides before OCR to catch
         characters at the very edge of the detected bbox.
@@ -443,10 +619,30 @@ class BioVisionHybrid:
             psm = 4                     # Multi-column / mixed layout
 
         # ════════════════════════════════════════════════════
-        # INDONESIAN & ENGLISH → Tesseract OCR
+        # ENGLISH → PaddleOCR (STRICT)
         # ════════════════════════════════════════════════════
-        tess_lang = 'ind' if lang == 'id' else 'eng'
-        
+        if lang == 'en':
+            try:
+                ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
+                if ocr_result and ocr_result[0]:
+                    lines, confidences = [], []
+                    for line in ocr_result[0]:
+                        text = line[1][0]
+                        conf = line[1][1]
+                        if conf > 0.35:   # balanced threshold
+                            lines.append(text)
+                            confidences.append(conf)
+                    if lines:
+                        avg_conf = sum(confidences) / len(confidences)
+                        return " ".join(lines), avg_conf
+            except Exception as e:
+                logger.warning(f"PaddleOCR (en) failed: {e}")
+
+            return "", 0.0
+
+        # ════════════════════════════════════════════════════
+        # INDONESIAN → Tesseract OCR (STRICT, lang pack 'ind')
+        # ════════════════════════════════════════════════════
         if TESSERACT_AVAILABLE:
             try:
                 rgb = cv2.cvtColor(clean_crop, cv2.COLOR_BGR2RGB)
@@ -454,7 +650,7 @@ class BioVisionHybrid:
 
                 config = f'--oem 3 --psm {psm}'
                 data = pytesseract.image_to_data(
-                    pil_img, lang=tess_lang, config=config,
+                    pil_img, lang='ind', config=config,
                     output_type=pytesseract.Output.DICT
                 )
 
@@ -476,7 +672,7 @@ class BioVisionHybrid:
                 # (sparse text — finds individual words anywhere)
                 if psm != 11:
                     data2 = pytesseract.image_to_data(
-                        pil_img, lang=tess_lang,
+                        pil_img, lang='ind',
                         config='--oem 3 --psm 11',
                         output_type=pytesseract.Output.DICT
                     )
@@ -489,35 +685,13 @@ class BioVisionHybrid:
                             confs2.append(conf / 100.0)
                     if words2:
                         avg_conf = sum(confs2) / len(confs2)
-                        logger.debug(f"PSM 11 rescue ({tess_lang}): found {len(words2)} words")
+                        logger.debug(f"PSM 11 rescue (ind): found {len(words2)} words")
                         return ' '.join(words2), avg_conf
 
-                return "", 0.0
-
             except Exception as e:
-                logger.warning(f"Tesseract ({tess_lang}) failed: {e}")
-                # Fall through to PaddleOCR
+                logger.warning(f"Tesseract (ind) failed: {e}")
         else:
-            logger.warning(f"⚠️ Tesseract not available — using PaddleOCR as fallback for {lang}")
-
-        # ════════════════════════════════════════════════════
-        # FALLBACK → PaddleOCR ONLY 
-        # ════════════════════════════════════════════════════
-        try:
-            ocr_result = self.ocr_engine.ocr(clean_crop, cls=False)
-            if ocr_result and ocr_result[0]:
-                lines, confidences = [], []
-                for line in ocr_result[0]:
-                    text = line[1][0]
-                    conf = line[1][1]
-                    if conf > 0.35:   # balanced threshold
-                        lines.append(text)
-                        confidences.append(conf)
-                if lines:
-                    avg_conf = sum(confidences) / len(confidences)
-                    return " ".join(lines), avg_conf
-        except Exception as e:
-            logger.warning(f"PaddleOCR fallback ({lang}) failed: {e}")
+            logger.warning("⚠️ Tesseract not available for Indonesian")
 
         return "", 0.0
 
@@ -605,7 +779,7 @@ Output ONLY the JSON array, nothing else."""
         Main entry point for the hybrid pipeline.
 
         Pipeline:
-          1. PPStructure → detect layout regions
+          1. Surya        → detect layout regions
           2. PaddleOCR   → extract text from each text region
           3. AI (optional) → classify text into chapters
           4. Post-process → crop tables/figures from original image
@@ -653,7 +827,7 @@ Output ONLY the JSON array, nothing else."""
         cv2.imwrite(preview_path, original_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
         # ── STAGE 1: Layout Detection ─────────────────────────────
-        logger.info("\ud83d\udcd0 Stage 1: Layout detection (PPStructure)...")
+        logger.info("📐 Stage 1: Layout detection (Surya)...")
         regions = self._detect_layout(ocr_img)   # Gunakan ocr_img (sudah upscale jika perlu)
 
         # Scale-down bbox jika gambar di-upscale agar bbox sesuai original_img
@@ -661,7 +835,7 @@ Output ONLY the JSON array, nothing else."""
             for r in regions:
                 r['bbox'] = [int(v / ocr_scale) for v in r['bbox']]
 
-        # Fallback: if PPStructure finds nothing, OCR the full page
+        # Fallback: if Surya finds nothing, OCR the full page
         if not regions:
             logger.warning("⚠️ No layout regions detected — OCR-ing full page")
             regions = [{"type": "paragraph", "bbox": [0, 0, w, h]}]
@@ -669,14 +843,14 @@ Output ONLY the JSON array, nothing else."""
         # NOTE: Visual-box heuristic is applied inside _detect_layout()
 
 
-        # ── STAGE 2: Split — tables/figures from PPStructure, text from full-page OCR ──
-        # PPStructure is good at detecting tables & figures but unreliable for text regions.
-        # So we only use PPStructure for table/figure bboxes, and run PaddleOCR on the
+        # ── STAGE 2: Split — tables/figures from Surya, text from full-page OCR ──
+        # Surya is used for layout detection (table/figure/text/heading regions).
+        # We collect table/figure bboxes, and run PaddleOCR on the
         # full page to capture ALL text lines, then filter out those inside table/figure areas.
-        logger.info(f"📝 Stage 2: Extracting tables/figures from PPStructure + full-page OCR for text...")
+        logger.info(f"📝 Stage 2: Extracting tables/figures from Surya + full-page OCR for text...")
         elements = []
 
-        # ── 2A: Collect table/figure regions from PPStructure ──
+        # ── 2A: Collect table/figure regions from Surya ──
         visual_bboxes = []  # bboxes of table/figure regions (to exclude from text)
         for region in regions:
             rtype = region['type']
@@ -690,9 +864,9 @@ Output ONLY the JSON array, nothing else."""
                     "confidence": 0.95
                 })
                 visual_bboxes.append(bbox)
-                logger.info(f"📦 PPStructure {rtype}: bbox={bbox}")
+                logger.info(f"📦 Surya {rtype}: bbox={bbox}")
 
-        logger.info(f"📐 Found {len(visual_bboxes)} table/figure regions from PPStructure")
+        logger.info(f"📐 Found {len(visual_bboxes)} table/figure regions from Surya")
 
         # ── 2B: Full-page OCR for ALL text ──
         # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
@@ -816,7 +990,7 @@ Output ONLY the JSON array, nothing else."""
         # Khusus dokumen ID: jalankan Tesseract pada seluruh halaman dengan PSM 3
         # (auto page segmentation) untuk menangkap teks yang PaddleOCR miss.
         # Ini sangat efektif untuk: footnote, watermark teks, header/footer,
-        # teks di area yang PPStructure classify salah sebagai figure.
+        # teks di area yang salah diklasifikasi sebagai figure.
         if lang == 'id' and TESSERACT_AVAILABLE:
             try:
                 logger.info("🔎 Stage 2.55: Tesseract full-page Indonesian pass (PSM 3)...")

@@ -1,0 +1,41 @@
+Python: 3.11.0 (main, Oct 24 2022, 18:26:48) [MSC v.1933 64 bit (AMD64)]
+============================================================
+
+[1/4] Importing Surya modules...
+  OK All Surya imports (67.9s)
+  LAYOUT_MODEL_CHECKPOINT: s3://layout/2025_09_23
+
+[2/4] Initializing Surya model...
+  OK Model initialized (2.5s)
+
+[3/4] Loading test image...
+  Using: PREVIEW_101. rev01 - PTB 2in1 eng.docx_0.jpg
+  OK Image loaded: 1749x2481
+
+[4/4] Running Surya layout detection...
+  OK Layout detection (15.3s)
+  Found 16 layout elements
+    [ 0] sectionheader         bbox=(52,70,360,113)  size=308x43
+    [ 1] sectionheader         bbox=(58,142,289,181)  size=231x39
+    [ 2] text                  bbox=(54,197,556,238)  size=502x41
+    [ 3] picture               bbox=(1201,66,1681,219)  size=480x153
+    [ 4] text                  bbox=(56,279,1682,393)  size=1626x114
+    [ 5] sectionheader         bbox=(88,421,556,465)  size=468x44
+    [ 6] table                 bbox=(58,522,1687,1047)  size=1629x525
+    [ 7] sectionheader         bbox=(90,1115,240,1147)  size=150x32
+    [ 8] text                  bbox=(52,1183,1586,1219)  size=1534x36
+    [ 9] sectionheader         bbox=(92,1250,430,1284)  size=338x34
+    [10] text                  bbox=(70,1315,1658,1393)  size=1588x78
+    [11] picture               bbox=(527,1402,1265,1964)  size=738x562
+    [12] caption               bbox=(632,1940,1249,1979)  size=617x39
+    [13] listitem              bbox=(69,1998,1672,2158)  size=1603x160
+    [14] listitem              bbox=(58,2166,1622,2238)  size=1564x72
+    [15] sectionheader         bbox=(88,2315,341,2346)  size=253x31
+
+  Summary: {'caption': 1, 'listitem': 2, 'picture': 2, 'sectionheader': 6, 'table': 1, 'text': 4}
+
+============================================================
+ALL TESTS PASSED — Surya is fully functional!
+============================================================
+
+Results saved to: C:\Users\Hanna\Manbook-v4\backend\_surya_test_result.txt
