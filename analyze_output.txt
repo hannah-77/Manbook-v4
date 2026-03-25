@@ -1,0 +1,40 @@
+﻿Analyzing main.dart...                                          
+
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:415:28 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:429:30 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:441:28 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:585:34 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:635:39 - deprecated_member_use
+   info - 'activeColor' is deprecated and shouldn't be used. Use activeThumbColor instead. This feature was deprecated after v3.31.0-2.0.pre - lib\main.dart:852:25 - deprecated_member_use
+   info - Don't invoke 'print' in production code - lib\main.dart:1112:5 - avoid_print
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:1120:44 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:1145:46 - deprecated_member_use
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\main.dart:1156:79 - deprecated_member_use
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\main.dart:1181:79 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\main.dart:1289:43 - deprecated_member_use
+   info - Unnecessary use of 'toList' in a spread - lib\main.dart:1545:28 - unnecessary_to_list_in_spreads
+   info - Unnecessary use of 'toList' in a spread - lib\main.dart:1595:10 - unnecessary_to_list_in_spreads
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:1785:21 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:1797:32 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\main.dart:1807:21 - use_build_context_synchronously
+warning - The value of the local variable 'matrix' isn't used - lib\main.dart:1815:11 - unused_local_variable
+warning - The value of the local variable 'scaleRatio' isn't used - lib\main.dart:1823:11 - unused_local_variable
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\main.dart:1829:9 - deprecated_member_use
+warning - The declaration '_zoomIn' isn't referenced - lib\main.dart:1837:8 - unused_element
+warning - The declaration '_zoomOut' isn't referenced - lib\main.dart:1841:8 - unused_element
+warning - The declaration '_resetZoom' isn't referenced - lib\main.dart:1845:8 - unused_element
+warning - The declaration '_previousPage' isn't referenced - lib\main.dart:1852:8 - unused_element
+warning - The declaration '_nextPage' isn't referenced - lib\main.dart:1861:8 - unused_element
+   info - Unnecessary braces in a string interpolation - lib\main.dart:1995:77 - unnecessary_brace_in_string_interps
+
+flutter : 26 issues found. (ran in 2.3s)
+At line:1 char:1
++ flutter analyze lib/main.dart 2>&1 | 
+Out-File -FilePath C:\Users\Hann ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (2 
+   6 issues found. (ran in 2.3s):String) [],   
+  RemoteException
+    + FullyQualifiedErrorId : NativeCommandErr 
+   or
+ 

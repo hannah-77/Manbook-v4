@@ -34,6 +34,11 @@ def _get_base_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _get_output_dir():
+    """Get the output_results directory path."""
+    return os.path.join(_get_base_path(), "output_results")
+
+
 class BioArchitect:
     """
     Bertugas menyusun kembali data ke Template Standar (.docx).
@@ -63,6 +68,57 @@ class BioArchitect:
         if os.path.exists(candidate):
             return candidate
         logger.warning(f"Letterhead tidak ditemukan: {raw}")
+        return None
+
+    def _resolve_crop_path(self, item):
+        """
+        Resolve the local file path for a figure/table crop image.
+
+        Tries multiple strategies (in order):
+          1. crop_local: absolute path  → if it exists on disk
+          2. crop_url:   extract filename from URL → check output_results/
+          3. crop_local: relative path  → resolve against base_path
+          4. crop_local: basename only  → check output_results/
+
+        Returns the resolved absolute path, or None if not found.
+        """
+        output_dir = _get_output_dir()
+
+        # ── Strategy 1: crop_local as-is (absolute path) ──
+        crop_local = item.get('crop_local')
+        if crop_local and os.path.exists(crop_local):
+            return crop_local
+
+        # ── Strategy 2: Extract filename from crop_url ──
+        crop_url = item.get('crop_url')
+        if crop_url and isinstance(crop_url, str):
+            try:
+                from urllib.parse import unquote, urlparse
+                parsed = urlparse(crop_url)
+                url_filename = unquote(parsed.path.split('/')[-1])
+                if url_filename:
+                    candidate = os.path.join(output_dir, url_filename)
+                    if os.path.exists(candidate):
+                        logger.info(f"   🔄 Fallback: resolved via crop_url → {candidate}")
+                        return candidate
+            except Exception:
+                pass
+
+        # ── Strategy 3: crop_local as relative path ──
+        if crop_local:
+            candidate = os.path.join(self.base_path, crop_local)
+            if os.path.exists(candidate):
+                logger.info(f"   🔄 Fallback: resolved as relative path → {candidate}")
+                return candidate
+
+            # ── Strategy 4: Just the basename in output_results ──
+            basename = os.path.basename(crop_local)
+            if basename:
+                candidate = os.path.join(output_dir, basename)
+                if os.path.exists(candidate):
+                    logger.info(f"   🔄 Fallback: resolved via basename → {candidate}")
+                    return candidate
+
         return None
 
     # ─────────────────────────────────────────────
@@ -191,10 +247,10 @@ class BioArchitect:
                 from PIL import Image as PILImage
                 import io
 
-                # Crop hanya 30% bawah (gelombang biru + logo)
+                # Crop hanya 10% bawah agar tidak terlalu tinggi (mencegah footer naik ke tengah halaman)
                 img = PILImage.open(self.letterhead_path)
                 img_w, img_h = img.size
-                crop_top = int(img_h * 0.70)
+                crop_top = int(img_h * 0.92)  # Ambil 8% terbawah saja
                 cropped = img.crop((0, crop_top, img_w, img_h))
 
                 img_buffer = io.BytesIO()
@@ -628,25 +684,54 @@ class BioArchitect:
                     h.paragraph_format.first_line_indent = Pt(0)
 
                 elif content_type in ('figure', 'table'):
-                    if item.get('crop_local') and os.path.exists(item['crop_local']):
-                        # Label
-                        lbl = doc.add_paragraph()
-                        lbl.paragraph_format.first_line_indent = Pt(0)
-                        lr  = lbl.add_run(f"[ {content_type.upper()} ]")
-                        lr.bold = True
-                        lr.font.color.rgb = self.COLOR_PRIMARY
-                        lr.font.size = Pt(10)
+                    # ── Resolve crop image path with multiple fallback strategies ──
+                    crop_local_val = self._resolve_crop_path(item)
+                    logger.info(f"🖼️ {content_type}: crop_local={crop_local_val!r}, exists={os.path.exists(crop_local_val) if crop_local_val else 'N/A'}")
+                    if crop_local_val and os.path.exists(crop_local_val):
+                        # Check if the crop file is large enough to be an actual image
+                        # Very small files (<5KB) are likely just cropped caption text
+                        crop_file_size = os.path.getsize(crop_local_val)
+                        logger.info(f"   📏 crop size: {crop_file_size} bytes")
+                        if crop_file_size < 5000:  # Less than 5KB
+                            # Too small — probably just caption text, render as paragraph
+                            if text and text not in ("[TABLE DATA DETECTED]", "[FIGURE]", "[TABLE]"):
+                                p = doc.add_paragraph(text)
+                                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                p.paragraph_format.first_line_indent = Pt(0)
+                                p.runs[0].italic = True
+                                p.runs[0].font.size = Pt(10)
+                                p.runs[0].font.color.rgb = self.COLOR_GRAY
+                            continue
 
                         # Gambar dengan border tipis via tabel 1-cell
                         try:
+                            from docx.enum.text import WD_LINE_SPACING
                             tbl = doc.add_table(rows=1, cols=1)
                             tbl.style = 'Table Grid'
                             cell = tbl.cell(0, 0)
                             cell_para = cell.paragraphs[0]
                             cell_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                             cell_para.paragraph_format.first_line_indent = Pt(0)
+                            # FIX: remove exact line spacing that clips the image
+                            cell_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+                            cell_para.paragraph_format.space_before = Pt(0)
+                            cell_para.paragraph_format.space_after = Pt(0)
                             run_img = cell_para.add_run()
-                            run_img.add_picture(item['crop_local'], width=Inches(4.5))
+                            
+                            # Cek lebar/resolusi untuk insert
+                            try:
+                                from PIL import Image
+                                with Image.open(crop_local_val) as img_temp:
+                                    w, h = img_temp.size
+                                # Jika gambar terlalu kecil, gunakan fallback
+                                if w < 50 and h < 50:
+                                    doc.add_paragraph(f"[ Gambar terlalu kecil ]")
+                                    continue
+                            except Exception:
+                                pass
+
+                            run_img.add_picture(crop_local_val, width=Inches(4.5))
+                            logger.info(f"   ✅ Picture added successfully: {os.path.basename(crop_local_val)}")
                         except Exception as e:
                             logger.error(f"Error adding picture: {e}")
                             doc.add_paragraph(f"[ Gagal load gambar: {e} ]")
@@ -664,6 +749,10 @@ class BioArchitect:
                         doc.add_paragraph()   # spasi setelah gambar
 
                     else:
+                        logger.warning(f"   ❌ Could not resolve any crop path for {content_type}")
+                        logger.warning(f"      item keys: {list(item.keys())}")
+                        logger.warning(f"      crop_local: {item.get('crop_local')!r}")
+                        logger.warning(f"      crop_url: {item.get('crop_url')!r}")
                         p = doc.add_paragraph(f"[ {content_type} — gambar tidak tersedia ]")
                         p.paragraph_format.first_line_indent = Pt(0)
                         p.runs[0].font.color.rgb = self.COLOR_GRAY

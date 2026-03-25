@@ -98,6 +98,9 @@ except ImportError:
 # Import OpenRouter Smart Client
 from openrouter_client import get_openrouter_client
 
+# Import Language Filter (enforce target language on all output)
+from language_filter import enforce_language, get_language_instruction, clean_text
+
 # Import Text Corrector (OCR post-processor)
 try:
     from text_corrector import correct_ocr_text
@@ -150,8 +153,9 @@ class BioVisionHybrid:
         # ENGLISH: PaddleOCR (lang 'en')
         logger.info("Initializing PaddleOCR: Ready (English)...")
         self.ocr_engine = PaddleOCR(
-            use_angle_cls=True,
+            use_angle_cls=False,  # Matikan untuk menghemat waktu (overhead berkurang signifikan)
             lang='en',
+            use_gpu=True,         # Gunakan GPU jika tersedia, fallback ke CPU secara otomatis
             show_log=False
         )
 
@@ -423,6 +427,26 @@ class BioVisionHybrid:
                 # Track label counts for logging
                 label_counts[label] = label_counts.get(label, 0) + 1
 
+                # Validate: if Surya says 'figure', check if it's actually visual content
+                # Many false positives: Surya labels caption text ("Figure 11") as 'figure'
+                if rtype == 'figure':
+                    region_w = x2 - x1
+                    region_h = y2 - y1
+                    # Too small to be a real figure (likely caption text)
+                    if region_w < 80 or region_h < 80:
+                        logger.debug(
+                            f"Figure too small ({region_w}x{region_h}), reclassifying as paragraph: "
+                            f"bbox=[{x1},{y1},{x2},{y2}]"
+                        )
+                        rtype = 'paragraph'
+                    # Check if region has actual visual content (not just text on white)
+                    elif not self._is_visual_content(image_cv, [x1, y1, x2, y2]):
+                        logger.debug(
+                            f"Figure region has no visual content, reclassifying as paragraph: "
+                            f"bbox=[{x1},{y1},{x2},{y2}]"
+                        )
+                        rtype = 'paragraph'
+
                 regions.append({
                     "type": rtype,
                     "bbox": [x1, y1, x2, y2],
@@ -627,9 +651,9 @@ class BioVisionHybrid:
                 if ocr_result and ocr_result[0]:
                     lines, confidences = [], []
                     for line in ocr_result[0]:
-                        text = line[1][0]
+                        text = clean_text(line[1][0])  # Enforce Latin-only
                         conf = line[1][1]
-                        if conf > 0.35:   # balanced threshold
+                        if conf > 0.35 and text:   # balanced threshold
                             lines.append(text)
                             confidences.append(conf)
                     if lines:
@@ -774,7 +798,7 @@ Output ONLY the JSON array, nothing else."""
     # ═══════════════════════════════════════════════════════════════
     # MAIN ENTRY POINT: scan_document
     # ═══════════════════════════════════════════════════════════════
-    def scan_document(self, image_path, filename_base, session_id=None, lang='id'):
+    def scan_document(self, image_path, filename_base, session_id=None, lang='id', direct_translate=False, fast_mode=True):
         """
         Main entry point for the hybrid pipeline.
 
@@ -805,11 +829,14 @@ Output ONLY the JSON array, nothing else."""
         # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
         # Dokumen yang di-scan dengan resolusi rendah sering menghasilkan
         # teks blur yang tidak bisa dibaca oleh OCR manapun.
-        # Upscale 2x jika lebar < 1500px (threshold untuk teks 10pt terbaca baik)
+        # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
+        # Diturunkan ambang batasnya menjadi 1200, atau dimatikan sebagian jika fast_mode
         ocr_img = original_img   # Gambar yang dipakai untuk OCR (bisa berbeda dari preview)
         ocr_scale = 1.0
-        if w < 1500:
-            scale_factor = min(2.0, 1500 / w)   # max 2x upscale
+        upscale_threshold = 1000 if fast_mode else 1200
+        
+        if w < upscale_threshold:
+            scale_factor = min(2.0, upscale_threshold / w)   # max 2x upscale
             new_w = int(w * scale_factor)
             new_h = int(h * scale_factor)
             ocr_img = cv2.resize(
@@ -843,273 +870,332 @@ Output ONLY the JSON array, nothing else."""
         # NOTE: Visual-box heuristic is applied inside _detect_layout()
 
 
-        # ── STAGE 2: Split — tables/figures from Surya, text from full-page OCR ──
-        # Surya is used for layout detection (table/figure/text/heading regions).
-        # We collect table/figure bboxes, and run PaddleOCR on the
-        # full page to capture ALL text lines, then filter out those inside table/figure areas.
-        logger.info(f"📝 Stage 2: Extracting tables/figures from Surya + full-page OCR for text...")
+        # ── STAGE 2: Text Extraction ──
         elements = []
-
-        # ── 2A: Collect table/figure regions from Surya ──
-        visual_bboxes = []  # bboxes of table/figure regions (to exclude from text)
-        for region in regions:
-            rtype = region['type']
-            bbox = region['bbox']
-
-            if rtype in ('table', 'figure'):
-                elements.append({
-                    "type": rtype,
-                    "text": f"[{rtype.upper()}]",
-                    "bbox": bbox,
-                    "confidence": 0.95
-                })
-                visual_bboxes.append(bbox)
-                logger.info(f"📦 Surya {rtype}: bbox={bbox}")
-
-        logger.info(f"📐 Found {len(visual_bboxes)} table/figure regions from Surya")
-
-        # ── 2B: Full-page OCR for ALL text ──
-        # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
-        text_line_count = 0
-        try:
-            full_page_result = self.ocr_engine.ocr(original_img, cls=False)
-
-            if full_page_result and full_page_result[0]:
-                # Collect all text lines with their positions
-                raw_lines = []
-                for line in full_page_result[0]:
-                    points = line[0]
-                    text   = line[1][0].strip()
-                    conf   = line[1][1]
-
-                    if not text or conf < 0.30 or len(text) < 2:
-                        continue
-
-                    # Convert polygon to axis-aligned bbox
-                    xs = [p[0] for p in points]
-                    ys = [p[1] for p in points]
-                    lx1, ly1 = int(min(xs)), int(min(ys))
-                    lx2, ly2 = int(max(xs)), int(max(ys))
-
-                    # Skip tiny fragments
-                    if (lx2 - lx1) < 10 or (ly2 - ly1) < 5:
-                        continue
-
-                    # Check if this text line is INSIDE a table/figure region
-                    is_inside_visual = False
-                    for vx1, vy1, vx2, vy2 in visual_bboxes:
-                        # Compute overlap
-                        ox1 = max(lx1, vx1)
-                        oy1 = max(ly1, vy1)
-                        ox2 = min(lx2, vx2)
-                        oy2 = min(ly2, vy2)
-                        if ox2 > ox1 and oy2 > oy1:
-                            overlap_area = (ox2 - ox1) * (oy2 - oy1)
-                            line_area = (lx2 - lx1) * (ly2 - ly1) or 1
-                            if overlap_area / line_area > 0.40:
-                                is_inside_visual = True
-                                break
-
-                    if not is_inside_visual:
-                        raw_lines.append({
-                            "text": text,
-                            "bbox": [lx1, ly1, lx2, ly2],
-                            "confidence": round(conf, 2),
+        if direct_translate:
+            logger.info("🧠 DIRECT TRANSLATE MODE: Extracting text from image regions with AI...")
+            import base64
+            
+            vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
+            old_model = openrouter.model
+            old_prov = getattr(openrouter, 'provider', '')
+            
+            try:
+                openrouter.model = vision_model
+                openrouter.provider = ""  # Clear provider restraint to auto-route for image models
+                
+                for region in regions:
+                    rtype = region['type']
+                    bbox = region['bbox']
+                    if rtype in ('table', 'figure'):
+                        elements.append({
+                            "type": rtype,
+                            "text": f"[{rtype.upper()}]",
+                            "bbox": bbox,
+                            "confidence": 0.95
                         })
+                        continue
+                    
+                    # Direct Translate Region
+                    x1, y1, x2, y2 = bbox
+                    pad = 10
+                    px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
+                    px2, py2 = min(w, x2 + pad), min(h, y2 + pad)
+                    crop_visual = original_img[py1:py2, px1:px2]
+                    
+                    if crop_visual.size > 0:
+                        _, buffer = cv2.imencode('.jpg', crop_visual)
+                        b64_img = base64.b64encode(buffer).decode('utf-8')
+                        # Build language-aware prompt
+                        target_lang_name = "Bahasa Indonesia" if lang == 'id' else "English"
+                        lang_rules = get_language_instruction(lang)
+                        prompt = (
+                            f"Extract and translate ALL text in this image region to {target_lang_name}. "
+                            f"Keep formatting/newlines if possible. Output ONLY the translated text, "
+                            f"do not add markdown or explanations.\n\n{lang_rules}"
+                        )
+                        try:
+                            res = openrouter.call(prompt, image_base64=b64_img, timeout=45)
+                            if res:
+                                # Enforce target language: strip non-Latin scripts
+                                clean_res = enforce_language(res, lang=lang)
+                                if clean_res:
+                                    elements.append({
+                                        "type": rtype,
+                                        "text": clean_res,
+                                        "bbox": bbox,
+                                        "confidence": 0.99
+                                    })
+                        except Exception as e:
+                            logger.warning(f"Direct translate failed for region: {e}")
+            finally:
+                openrouter.model = old_model
+                openrouter.provider = old_prov
+        else:
+            # Surya is used for layout detection (table/figure/text/heading regions).
+            # We collect table/figure bboxes, and run PaddleOCR on the
+            # full page to capture ALL text lines, then filter out those inside table/figure areas.
+            logger.info(f"📝 Stage 2: Extracting tables/figures from Surya + full-page OCR for text...")
+            
+            # ── 2A: Collect table/figure regions from Surya ──
+            visual_bboxes = []  # bboxes of table/figure regions (to exclude from text)
+            for region in regions:
+                rtype = region['type']
+                bbox = region['bbox']
 
-                # ── Merge adjacent text lines into paragraphs ──
-                # PaddleOCR returns line-by-line; merge vertically close lines
-                if raw_lines:
-                    raw_lines.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
-                    merged = [dict(raw_lines[0])]
+                if rtype in ('table', 'figure'):
+                    elements.append({
+                        "type": rtype,
+                        "text": f"[{rtype.upper()}]",
+                        "bbox": bbox,
+                        "confidence": 0.95
+                    })
+                    visual_bboxes.append(bbox)
+                    logger.info(f"📦 Surya {rtype}: bbox={bbox}")
 
-                    for line in raw_lines[1:]:
-                        prev = merged[-1]
-                        pb = prev['bbox']
-                        lb = line['bbox']
+            logger.info(f"📐 Found {len(visual_bboxes)} table/figure regions from Surya")
 
-                        vertical_gap = lb[1] - pb[3]  # top of new - bottom of prev
-                        x_overlap = min(pb[2], lb[2]) - max(pb[0], lb[0])
-                        min_width = min(pb[2] - pb[0], lb[2] - lb[0]) or 1
+            # ── 2B: Full-page OCR for ALL text ──
+            # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
+            text_line_count = 0
+            try:
+                full_page_result = self.ocr_engine.ocr(original_img, cls=False)
 
-                        # Merge if vertically close (<25px) AND horizontally overlapping (>20%)
-                        if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
-                            prev['text'] = prev['text'] + ' ' + line['text']
-                            prev['bbox'] = [
-                                min(pb[0], lb[0]),
-                                min(pb[1], lb[1]),
-                                max(pb[2], lb[2]),
-                                max(pb[3], lb[3])
-                            ]
-                            prev['confidence'] = round(
-                                (prev['confidence'] + line['confidence']) / 2, 2
+                if full_page_result and full_page_result[0]:
+                    # Collect all text lines with their positions
+                    raw_lines = []
+                    for line in full_page_result[0]:
+                        points = line[0]
+                        text   = clean_text(line[1][0].strip())  # Enforce Latin-only
+                        conf   = line[1][1]
+
+                        if not text or conf < 0.30 or len(text) < 2:
+                            continue
+
+                        # Convert polygon to axis-aligned bbox
+                        xs = [p[0] for p in points]
+                        ys = [p[1] for p in points]
+                        lx1, ly1 = int(min(xs)), int(min(ys))
+                        lx2, ly2 = int(max(xs)), int(max(ys))
+
+                        # Skip tiny fragments
+                        if (lx2 - lx1) < 10 or (ly2 - ly1) < 5:
+                            continue
+
+                        # Check if this text line is INSIDE a table/figure region
+                        is_inside_visual = False
+                        for vx1, vy1, vx2, vy2 in visual_bboxes:
+                            # Compute overlap
+                            ox1 = max(lx1, vx1)
+                            oy1 = max(ly1, vy1)
+                            ox2 = min(lx2, vx2)
+                            oy2 = min(ly2, vy2)
+                            if ox2 > ox1 and oy2 > oy1:
+                                overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                                line_area = (lx2 - lx1) * (ly2 - ly1) or 1
+                                if overlap_area / line_area > 0.40:
+                                    is_inside_visual = True
+                                    break
+
+                        if not is_inside_visual:
+                            raw_lines.append({
+                                "text": text,
+                                "bbox": [lx1, ly1, lx2, ly2],
+                                "confidence": round(conf, 2),
+                            })
+
+                    # ── Merge adjacent text lines into paragraphs ──
+                    # PaddleOCR returns line-by-line; merge vertically close lines
+                    if raw_lines:
+                        raw_lines.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
+                        merged = [dict(raw_lines[0])]
+
+                        for line in raw_lines[1:]:
+                            prev = merged[-1]
+                            pb = prev['bbox']
+                            lb = line['bbox']
+
+                            vertical_gap = lb[1] - pb[3]  # top of new - bottom of prev
+                            x_overlap = min(pb[2], lb[2]) - max(pb[0], lb[0])
+                            min_width = min(pb[2] - pb[0], lb[2] - lb[0]) or 1
+
+                            # Merge if vertically close (<25px) AND horizontally overlapping (>20%)
+                            if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
+                                prev['text'] = prev['text'] + ' ' + line['text']
+                                prev['bbox'] = [
+                                    min(pb[0], lb[0]),
+                                    min(pb[1], lb[1]),
+                                    max(pb[2], lb[2]),
+                                    max(pb[3], lb[3])
+                                ]
+                                prev['confidence'] = round(
+                                    (prev['confidence'] + line['confidence']) / 2, 2
+                                )
+                            else:
+                                merged.append(dict(line))
+
+                        # ── Determine type (heading vs paragraph) ──
+                        # Use font size heuristic: tall text relative to page = heading
+                        avg_line_height = sum(
+                            m['bbox'][3] - m['bbox'][1] for m in merged
+                        ) / max(len(merged), 1)
+
+                        for m in merged:
+                            line_h = m['bbox'][3] - m['bbox'][1]
+                            text_len = len(m['text'])
+
+                            # Heading heuristic: short text + tall font OR all caps
+                            is_heading = (
+                                (line_h > avg_line_height * 1.3 and text_len < 80)
+                                or (m['text'].isupper() and text_len < 60)
+                                or (text_len < 50 and line_h > 30)
                             )
-                        else:
-                            merged.append(dict(line))
 
-                    # ── Determine type (heading vs paragraph) ──
-                    # Use font size heuristic: tall text relative to page = heading
-                    avg_line_height = sum(
-                        m['bbox'][3] - m['bbox'][1] for m in merged
-                    ) / max(len(merged), 1)
+                            elements.append({
+                                "type": "heading" if is_heading else "paragraph",
+                                "text": m['text'],
+                                "bbox": m['bbox'],
+                                "confidence": m['confidence'],
+                            })
+                            text_line_count += 1
 
-                    for m in merged:
-                        line_h = m['bbox'][3] - m['bbox'][1]
-                        text_len = len(m['text'])
-
-                        # Heading heuristic: short text + tall font OR all caps
-                        is_heading = (
-                            (line_h > avg_line_height * 1.3 and text_len < 80)
-                            or (m['text'].isupper() and text_len < 60)
-                            or (text_len < 50 and line_h > 30)
+                        logger.info(
+                            f"📝 Full-page OCR: {len(raw_lines)} lines → "
+                            f"{len(merged)} paragraphs ({text_line_count} text elements)"
                         )
 
-                        elements.append({
-                            "type": "heading" if is_heading else "paragraph",
-                            "text": m['text'],
-                            "bbox": m['bbox'],
-                            "confidence": m['confidence'],
-                        })
-                        text_line_count += 1
+            except Exception as e:
+                logger.error(f"Full-page OCR failed: {e}")
 
-                    logger.info(
-                        f"📝 Full-page OCR: {len(raw_lines)} lines → "
-                        f"{len(merged)} paragraphs ({text_line_count} text elements)"
+            # Sort all elements by vertical position (reading order)
+            elements.sort(key=lambda e: e['bbox'][1])
+
+
+
+
+            # ── STAGE 2.55: Tesseract Full-Page Pass (Indonesia only) ────────────
+            # Khusus dokumen ID: jalankan Tesseract pada seluruh halaman untuk menangkap
+            # teks yang PaddleOCR miss. Ini sangat efektif tapi lambat.
+            # Pada mode fast_mode, kita skip langkah tesseract ini untuk menghemat waktu besar.
+            if lang == 'id' and TESSERACT_AVAILABLE and not fast_mode:
+                try:
+                    logger.info("🔎 Stage 2.55: Tesseract full-page Indonesian pass (PSM 3)...")
+                    from PIL import Image as PILImage
+
+                    # Gunakan ocr_img (sudah upscale) untuk Tesseract juga
+                    rgb_full = cv2.cvtColor(ocr_img, cv2.COLOR_BGR2RGB)
+                    pil_full = PILImage.fromarray(rgb_full)
+
+                    data_full = pytesseract.image_to_data(
+                        pil_full, lang='ind',
+                        config='--oem 3 --psm 3',
+                        output_type=pytesseract.Output.DICT
                     )
 
-        except Exception as e:
-            logger.error(f"Full-page OCR failed: {e}")
+                    # Collect bboxes dari elemen yang sudah ada (untuk overlap check)
+                    existing_bboxes_t = [
+                        e['bbox'] for e in elements
+                        if e.get('type') not in ('table', 'figure')
+                    ]
 
-        # Sort all elements by vertical position (reading order)
-        elements.sort(key=lambda e: e['bbox'][1])
+                    tess_orphan_count = 0
+                    # Kelompokkan per block_num — setiap block = satu area teks Tesseract
+                    from itertools import groupby
+                    indices = range(len(data_full['text']))
+                    block_map = {}
+                    for i in indices:
+                        txt  = data_full['text'][i].strip()
+                        conf = int(data_full['conf'][i])
+                        bn   = data_full['block_num'][i]
+                        if not txt or conf < 25:
+                            continue
+                        lx1 = data_full['left'][i]
+                        ly1 = data_full['top'][i]
+                        lx2 = lx1 + data_full['width'][i]
+                        ly2 = ly1 + data_full['height'][i]
 
+                        # Scale bbox kembali ke koordinat original_img
+                        if ocr_scale != 1.0:
+                            lx1 = int(lx1 / ocr_scale)
+                            ly1 = int(ly1 / ocr_scale)
+                            lx2 = int(lx2 / ocr_scale)
+                            ly2 = int(ly2 / ocr_scale)
 
+                        if bn not in block_map:
+                            block_map[bn] = {'texts': [], 'confs': [], 'x1': lx1, 'y1': ly1, 'x2': lx2, 'y2': ly2}
+                        block_map[bn]['texts'].append(txt)
+                        block_map[bn]['confs'].append(conf)
+                        block_map[bn]['x1'] = min(block_map[bn]['x1'], lx1)
+                        block_map[bn]['y1'] = min(block_map[bn]['y1'], ly1)
+                        block_map[bn]['x2'] = max(block_map[bn]['x2'], lx2)
+                        block_map[bn]['y2'] = max(block_map[bn]['y2'], ly2)
 
+                    for bn, blk in block_map.items():
+                        text_out = ' '.join(blk['texts'])
+                        if len(text_out.strip()) < 3:
+                            continue
+                        avg_conf = sum(blk['confs']) / len(blk['confs']) / 100.0
+                        bx1, by1, bx2, by2 = blk['x1'], blk['y1'], blk['x2'], blk['y2']
 
-        # ── STAGE 2.55: Tesseract Full-Page Pass (Indonesia only) ────────────
-        # Khusus dokumen ID: jalankan Tesseract pada seluruh halaman dengan PSM 3
-        # (auto page segmentation) untuk menangkap teks yang PaddleOCR miss.
-        # Ini sangat efektif untuk: footnote, watermark teks, header/footer,
-        # teks di area yang salah diklasifikasi sebagai figure.
-        if lang == 'id' and TESSERACT_AVAILABLE:
-            try:
-                logger.info("🔎 Stage 2.55: Tesseract full-page Indonesian pass (PSM 3)...")
-                from PIL import Image as PILImage
+                        # Cek overlap dengan elemen yang sudah ada
+                        is_covered = False
+                        for ex1, ey1, ex2, ey2 in existing_bboxes_t:
+                            ox1 = max(bx1, ex1)
+                            oy1 = max(by1, ey1)
+                            ox2 = min(bx2, ex2)
+                            oy2 = min(by2, ey2)
+                            if ox2 > ox1 and oy2 > oy1:
+                                overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                                blk_area = (bx2 - bx1) * (by2 - by1) or 1
+                                if overlap_area / blk_area > 0.40:
+                                    is_covered = True
+                                    break
 
-                # Gunakan ocr_img (sudah upscale) untuk Tesseract juga
-                rgb_full = cv2.cvtColor(ocr_img, cv2.COLOR_BGR2RGB)
-                pil_full = PILImage.fromarray(rgb_full)
+                        if not is_covered:
+                            elements.append({
+                                'type': 'paragraph',
+                                'text': text_out,
+                                'bbox': [bx1, by1, bx2, by2],
+                                'confidence': round(avg_conf, 2),
+                                '_tess_recovery': True
+                            })
+                            existing_bboxes_t.append([bx1, by1, bx2, by2])
+                            tess_orphan_count += 1
 
-                data_full = pytesseract.image_to_data(
-                    pil_full, lang='ind',
-                    config='--oem 3 --psm 3',
-                    output_type=pytesseract.Output.DICT
-                )
+                    if tess_orphan_count > 0:
+                        logger.info(f"🌟 Tesseract recovery: +{tess_orphan_count} blok teks baru")
+                        # Re-sort setelah penambahan
+                        elements.sort(key=lambda e: e['bbox'][1])
+                    else:
+                        logger.info("✓ Tesseract full-page: tidak ada teks tambahan")
 
-                # Collect bboxes dari elemen yang sudah ada (untuk overlap check)
-                existing_bboxes_t = [
-                    e['bbox'] for e in elements
-                    if e.get('type') not in ('table', 'figure')
-                ]
+                except Exception as e:
+                    logger.warning(f"⚠️ Stage 2.55 Tesseract recovery gagal (non-fatal): {e}")
 
-                tess_orphan_count = 0
-                # Kelompokkan per block_num — setiap block = satu area teks Tesseract
-                from itertools import groupby
-                indices = range(len(data_full['text']))
-                block_map = {}
-                for i in indices:
-                    txt  = data_full['text'][i].strip()
-                    conf = int(data_full['conf'][i])
-                    bn   = data_full['block_num'][i]
-                    if not txt or conf < 25:
-                        continue
-                    lx1 = data_full['left'][i]
-                    ly1 = data_full['top'][i]
-                    lx2 = lx1 + data_full['width'][i]
-                    ly2 = ly1 + data_full['height'][i]
-
-                    # Scale bbox kembali ke koordinat original_img
-                    if ocr_scale != 1.0:
-                        lx1 = int(lx1 / ocr_scale)
-                        ly1 = int(ly1 / ocr_scale)
-                        lx2 = int(lx2 / ocr_scale)
-                        ly2 = int(ly2 / ocr_scale)
-
-                    if bn not in block_map:
-                        block_map[bn] = {'texts': [], 'confs': [], 'x1': lx1, 'y1': ly1, 'x2': lx2, 'y2': ly2}
-                    block_map[bn]['texts'].append(txt)
-                    block_map[bn]['confs'].append(conf)
-                    block_map[bn]['x1'] = min(block_map[bn]['x1'], lx1)
-                    block_map[bn]['y1'] = min(block_map[bn]['y1'], ly1)
-                    block_map[bn]['x2'] = max(block_map[bn]['x2'], lx2)
-                    block_map[bn]['y2'] = max(block_map[bn]['y2'], ly2)
-
-                for bn, blk in block_map.items():
-                    text_out = ' '.join(blk['texts'])
-                    if len(text_out.strip()) < 3:
-                        continue
-                    avg_conf = sum(blk['confs']) / len(blk['confs']) / 100.0
-                    bx1, by1, bx2, by2 = blk['x1'], blk['y1'], blk['x2'], blk['y2']
-
-                    # Cek overlap dengan elemen yang sudah ada
-                    is_covered = False
-                    for ex1, ey1, ex2, ey2 in existing_bboxes_t:
-                        ox1 = max(bx1, ex1)
-                        oy1 = max(by1, ey1)
-                        ox2 = min(bx2, ex2)
-                        oy2 = min(by2, ey2)
-                        if ox2 > ox1 and oy2 > oy1:
-                            overlap_area = (ox2 - ox1) * (oy2 - oy1)
-                            blk_area = (bx2 - bx1) * (by2 - by1) or 1
-                            if overlap_area / blk_area > 0.40:
-                                is_covered = True
-                                break
-
-                    if not is_covered:
-                        elements.append({
-                            'type': 'paragraph',
-                            'text': text_out,
-                            'bbox': [bx1, by1, bx2, by2],
-                            'confidence': round(avg_conf, 2),
-                            '_tess_recovery': True
-                        })
-                        existing_bboxes_t.append([bx1, by1, bx2, by2])
-                        tess_orphan_count += 1
-
-                if tess_orphan_count > 0:
-                    logger.info(f"🌟 Tesseract recovery: +{tess_orphan_count} blok teks baru")
-                    # Re-sort setelah penambahan
-                    elements.sort(key=lambda e: e['bbox'][1])
-                else:
-                    logger.info("✓ Tesseract full-page: tidak ada teks tambahan")
-
-            except Exception as e:
-                logger.warning(f"⚠️ Stage 2.55 Tesseract recovery gagal (non-fatal): {e}")
-
-        # ── STAGE 2.6: Text Correction (SymSpell + Context + Entity) ──
-        if TEXT_CORRECTOR_AVAILABLE:
-            try:
-                logger.info(f"✏️ Stage 2.6: OCR text correction (lang={lang})...")
-                corrected_count = 0
-                for elem in elements:
-                    # Only correct text elements (skip tables/figures)
-                    if elem.get('type') not in ('table', 'figure') and elem.get('text'):
-                        original_text = elem['text']
-                        elem['text'] = correct_ocr_text(elem['text'], lang=lang)
-                        if elem['text'] != original_text:
-                            corrected_count += 1
-                logger.info(f"✅ Text correction: {corrected_count}/{len(elements)} element(s) diperbaiki")
-            except Exception as e:
-                logger.warning(f"⚠️ Stage 2.6 text correction failed (non-fatal): {e}")
-        else:
-            logger.info("ℹ️ Text corrector tidak tersedia — melewati Stage 2.6")
+            # ── STAGE 2.6: Text Correction (SymSpell + Context + Entity) ──
+            if TEXT_CORRECTOR_AVAILABLE:
+                try:
+                    logger.info(f"✏️ Stage 2.6: OCR text correction (lang={lang})...")
+                    corrected_count = 0
+                    for elem in elements:
+                        # Only correct text elements (skip tables/figures)
+                        if elem.get('type') not in ('table', 'figure') and elem.get('text'):
+                            original_text = elem['text']
+                            elem['text'] = correct_ocr_text(elem['text'], lang=lang)
+                            if elem['text'] != original_text:
+                                corrected_count += 1
+                    logger.info(f"✅ Text correction: {corrected_count}/{len(elements)} element(s) diperbaiki")
+                except Exception as e:
+                    logger.warning(f"⚠️ Stage 2.6 text correction failed (non-fatal): {e}")
+            else:
+                logger.info("ℹ️ Text corrector tidak tersedia — melewati Stage 2.6")
 
         # ── STAGE 3: AI Chapter Classification ────────────────────
         ai_enabled = os.getenv("AI_VISION_OCR_ENABLED", "false").lower() in (
             "true", "1", "yes", "on"
         )
 
-        if ai_enabled and elements:
+        if not direct_translate and ai_enabled and elements:
             logger.info(f"🧠 Stage 3: AI chapter classification (text-only, lang={lang})...")
             classifications = self._classify_chapters_ai(elements, lang=lang)
 

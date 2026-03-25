@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 paddleocr==2.8.1
-paddlepaddle==2.6.2
+paddlepaddle-gpu==2.6.2
 rapidfuzz
 python-multipart
 pandas
@@ -23,3 +23,4 @@ requests
 opencv-python-headless
 langdetect
 PyPDF2
+pdfplumber

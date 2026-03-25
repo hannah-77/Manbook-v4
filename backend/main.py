@@ -38,6 +38,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 from bio_brain import BioBrain
 from bio_architect import BioArchitect
+from language_filter import enforce_language, enforce_language_on_items, get_language_instruction, clean_text
 
 try:
     from vision_engine import create_vision_engine
@@ -45,6 +46,14 @@ try:
 except Exception as e:
     VISION_ENGINE_AVAILABLE = False
     logging.warning(f"Vision Engine not available: {e}")
+
+try:
+    from direct_reader import is_text_pdf, extract_docx_direct, extract_pdf_direct
+    DIRECT_READER_AVAILABLE = True
+    logging.info("✓ DirectReader loaded (DOCX + PDF text extraction)")
+except Exception as e:
+    DIRECT_READER_AVAILABLE = False
+    logging.warning(f"DirectReader not available: {e}")
 
 try:
     from text_corrector import (
@@ -87,6 +96,9 @@ if not os.path.exists(OUTPUT_DIR):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [BioManual] - %(message)s')
 logger = logging.getLogger("BioManual")
+file_handler = logging.FileHandler('backend.log', encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - [BioManual] - %(message)s'))
+logger.addHandler(file_handler)
 
 # Configuration: Choose vision engine mode
 VISION_MODE = os.getenv('VISION_MODE', 'hybrid')
@@ -95,12 +107,15 @@ app = FastAPI(title="BioManual Auto-Standardizer")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 # Serve static files from backend directory (e.g., letterhead.png)
-@app.get("/files/{filename}")
+@app.api_route("/files/{filename}", methods=["GET", "HEAD"])
 async def serve_backend_file(filename: str):
     file_path = os.path.join(BASE_PATH, filename)
     if os.path.exists(file_path):
-        return FileResponse(file_path)
-    return {"error": "File not found"}
+        from fastapi.responses import FileResponse
+        content_type = "application/pdf" if filename.lower().endswith('.pdf') else None
+        return FileResponse(file_path, media_type=content_type)
+    from fastapi import Response
+    return Response(content="File not found", status_code=404)
 
 # ==========================================
 # SYSTEM ORCHESTRATOR (Integration)
@@ -326,9 +341,10 @@ CRITICAL RULES:
 1. You MUST ONLY write about topics related to "{chapter_title}".
 2. DO NOT include "Technical Specifications" unless this is the Specification chapter.
 3. DO NOT invent unnecessary components. Focus on standard operational procedures for this medical device.
-4. ABSOLUTELY NO CHINESE/MANDARIN CHARACTERS. The entire text must be strictly in English. Never use terms like 身高 or 施加力.
-5. {table_instruction}
-6. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+4. {table_instruction}
+5. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+
+{get_language_instruction('en')}
 
 The return format MUST BE a pure JSON array (NOT standard markdown), where each element has a "type" and "normalized". Example:
 [
@@ -360,9 +376,10 @@ ATURAN SANGAT PENTING:
 1. Anda HANYA boleh menulis topik seputar "{chapter_title}".
 2. JANGAN memasukkan "Spesifikasi Teknis" jika ini bukan bab Spesifikasi.
 3. JANGAN mengarang komponen yang tidak perlu. Fokus pada prosedur umum standar alat tersebut.
-4. WAJIB 100% BAHASA INDONESIA. DILARANG KERAS MENYELIPKAN AKSARA MANDARIN/CHINESE! JANGAN PERNAH MENULIS KATA SEPERTI 身高 atau 施加力.
-5. {table_instruction}
-6. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+4. {table_instruction}
+5. No Markdown headers outside the JSON array. Strictly return ONLY the JSON array.
+
+{get_language_instruction('id')}
 
 Format kembalian BUKAN markdown biasa, melainkan murni JSON array, tiap elemen memiliki "type" dan "normalized". Contoh:
 [
@@ -373,17 +390,17 @@ Keluarkan output JSON saja. Jangan tulis kalimat pengantar/penutup apapun.
 """
         response_text = client.call(prompt)
         
-        # Hard-filter any Chinese/CJK characters physically from the response string just in case
-        response_text = re.sub(r'[\u4e00-\u9fff\u3400-\u4dbf]+', '', response_text)
+        # Enforce target language: strip ALL non-Latin characters
+        response_text = enforce_language(response_text, lang=req.lang)
 
-        clean_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+        cleaned_json = re.sub(r'```json\s*|\s*```', '', response_text).strip()
         # Find first [ and last ]
-        start_idx = clean_text.find('[')
-        end_idx = clean_text.rfind(']')
+        start_idx = cleaned_json.find('[')
+        end_idx = cleaned_json.rfind(']')
         if start_idx != -1 and end_idx != -1:
-            clean_text = clean_text[start_idx:end_idx+1]
+            cleaned_json = cleaned_json[start_idx:end_idx+1]
             
-        items = json.loads(clean_text)
+        items = json.loads(cleaned_json)
         
         # Ensure format and assign chapter
         for item in items:
@@ -393,6 +410,96 @@ Keluarkan output JSON saja. Jangan tulis kalimat pengantar/penutup apapun.
     except Exception as e:
         import traceback
         logging.error(f"Error generating chapter: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
+
+class CheckCompletenessRequest(BaseModel):
+    chapter_id: str
+    items: list[dict]
+    lang: str = "id"
+
+@app.post("/check_chapter_completeness")
+async def check_chapter_completeness(req: CheckCompletenessRequest):
+    try:
+        from openrouter_client import get_openrouter_client
+        import base64
+        
+        # 1. Collect unique source images for this chapter
+        source_images = set()
+        extracted_texts = []
+        for item in req.items:
+            img_path = item.get("source_image_local")
+            if img_path and os.path.exists(img_path):
+                source_images.add(img_path)
+            
+            # Build extracted text dump
+            if item.get("type") in ["paragraph", "title", "heading", "list"]:
+                extracted_texts.append(f"[{item.get('type')}] {item.get('normalized', '')}")
+            elif item.get("type") in ["figure", "table"]:
+                extracted_texts.append(f"[{item.get('type')}] (Gambar/Tabel yang diekstrak)")
+
+        if not source_images:
+            return {"success": False, "error": "Tidak ada gambar dokumen asli yang terkait dengan bab ini (Mungkin perlu re-scan/upload ulang dokumen)."}
+
+        # 2. Build prompt
+        lang_instruction = "Gunakan bahasa Indonesia." if req.lang == 'id' else "Use English language."
+        prompt = f"""You are a QA Auditor for document extraction.
+Tugas Anda: Bandingkan Teks Ekstraksi di bawah ini dengan ISI di GAMBAR ASLI yang dilampirkan.
+Apakah ada informasi penting di gambar (paragraf, poin penting, judul, atau peringatan) yang HILANG / TIDAK TEREKSTRAK ke dalam teks?
+
+Teks Hasil Ekstraksi Bab '{req.chapter_id}':
+-----------------
+{chr(10).join(extracted_texts)}
+-----------------
+
+Evaluasi secara menyeluruh. {lang_instruction}
+Kembalikan HANYA format JSON valid berikut (tanpa markdown box):
+{{
+  "score": <0-100 angka seberapa lengkap teks mewakili keseluruhan gambar>,
+  "analysis": "<String analisis singkat mengenai apa yang kurang atau informasi bahwa semuanya sudah masuk>"
+}}"""
+
+        # 3. Read images
+        images_base64 = []
+        for img_path in sorted(list(source_images)):
+            img_cv = cv2.imread(img_path)
+            if img_cv is not None:
+                h, w = img_cv.shape[:2]
+                if w > 1200:
+                    scale = 1200 / w
+                    img_cv = cv2.resize(img_cv, (int(w*scale), int(h*scale)))
+                _, buffer = cv2.imencode('.jpg', img_cv, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                img_b64 = base64.b64encode(buffer).decode('utf-8')
+                images_base64.append(img_b64)
+
+        # 4. Call AI
+        client = get_openrouter_client()
+        content = [{"type": "text", "text": prompt}]
+        for img_b64 in images_base64[:4]: # Limit max 4 images to save tokens/avoid 413
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{img_b64}",
+                    "detail": "low"
+                }
+            })
+
+        logger.info(f"🔍 AI Completeness Check untuk {req.chapter_id} dengan {len(images_base64)} gambar...")
+        os.environ["AI_VISION_MODEL"] = "google/gemini-2.5-flash"  # Ensure using flash for speed
+        response_text = client.call(content)
+        
+        # Parse JSON
+        cleaned_json = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+        start_idx = cleaned_json.find('{')
+        end_idx = cleaned_json.rfind('}')
+        if start_idx != -1 and end_idx != -1:
+            cleaned_json = cleaned_json[start_idx:end_idx+1]
+            
+        result = json.loads(cleaned_json)
+        return {"success": True, "score": result.get("score", 0), "analysis": result.get("analysis", "")}
+
+    except Exception as e:
+        import traceback
+        logging.error(f"Completeness Check Error: {traceback.format_exc()}")
         return {"success": False, "error": str(e)}
 
 class GenerateReportRequest(BaseModel):
@@ -405,6 +512,28 @@ class GenerateReportRequest(BaseModel):
 @app.post("/generate_custom_report")
 async def generate_custom_report(req: GenerateReportRequest):
     try:
+        # ── Debug: trace crop_local values ──
+        fig_count = 0
+        crop_found = 0
+        crop_missing = 0
+        for item in req.items:
+            if item.get('type') in ('figure', 'table'):
+                fig_count += 1
+                cl = item.get('crop_local')
+                cu = item.get('crop_url')
+                if cl and os.path.exists(cl):
+                    crop_found += 1
+                    logger.info(f"✅ crop_local EXISTS: {cl}")
+                else:
+                    crop_missing += 1
+                    logger.warning(
+                        f"❌ crop_local MISSING: {cl!r} "
+                        f"(exists={os.path.exists(cl) if cl else 'N/A'}, "
+                        f"crop_url={cu!r}, "
+                        f"keys={list(item.keys())})"
+                    )
+        logger.info(f"📊 Export: {fig_count} figures/tables, {crop_found} crops found, {crop_missing} crops missing")
+
         # Panggil BioArchitect dengan data "items" baru yang sudah di-edit pengguna
         result = architect_module.build_report(
             req.items, req.filename, lang=req.lang,
@@ -412,11 +541,19 @@ async def generate_custom_report(req: GenerateReportRequest):
             custom_product_desc=req.custom_product_desc
         )
         word_filename = result.get('word_file')
+        pdf_filename = result.get('pdf_file')
         
         if word_filename:
-            word_url = f"http://127.0.0.1:8000/files/{word_filename}"
+            from urllib.parse import quote
+            word_url = f"http://127.0.0.1:8000/files/{quote(word_filename)}"
+            pdf_url = f"http://127.0.0.1:8000/files/{quote(pdf_filename)}" if pdf_filename else None
             docx_path = os.path.join(architect_module.base_path, word_filename)
-            return {"success": True, "word_url": word_url, "local_path": docx_path}
+            return {
+                "success": True,
+                "word_url": word_url,
+                "pdf_url": pdf_url,
+                "local_path": docx_path,
+            }
         else:
             return {"success": False, "error": "Report build failed or file not found"}
     except Exception as e:
@@ -842,12 +979,13 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
     # Gunakan session_id dan language dari header
     session_id = request.headers.get("X-Session-Id") or str(uuid.uuid4())
     doc_language = request.headers.get("X-Language", "id")  # 'id' or 'en'
+    direct_translate = request.headers.get("X-Direct-Translate", "false") == "true"
 
     # Initialize Brain per request (fresh context)
     brain_module = BioBrain()
     # Set initial context based on language
     brain_module.current_context = "Chapter 1" if doc_language == 'en' else "BAB 1"
-    logger.info(f"Starting BioManual Workflow for: {file.filename} (Session: {session_id})")
+    logger.info(f"Starting BioManual Workflow for: {file.filename} (Session: {session_id}, Direct Translate: {direct_translate})")
 
     temp_path = os.path.join(BASE_PATH, f"temp_{file.filename}")
     with open(temp_path, "wb") as buffer:
@@ -873,51 +1011,7 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
         # Normalize filename extension
         fname_lower = file.filename.lower()
 
-        # ─── BRANCH: DOCX / DOC ─────────────────────────────────────────
-        if fname_lower.endswith('.docx') or fname_lower.endswith('.doc'):
-            print(f"\n{'='*60}")
-            print(f"  📝 File   : {file.filename}")
-            print(f"  🔄 Step 1 : Converting Word document to PDF for Visual Scanning...")
-            print(f"{'='*60}")
-
-            progress_tracker[session_id].update({
-                "status": "processing",
-                "message": "Converting Word to PDF to preserve visual tables...",
-                "percentage": 10,
-            })
-
-            from docx2pdf import convert
-            pdf_path = temp_path + ".pdf"
-            try:
-                import pythoncom
-                pythoncom.CoInitialize()  # Required for COM in threads (Windows)
-                convert(temp_path, pdf_path)
-                temp_path = pdf_path       # Point to PDF for subsequent processing
-                fname_lower = fname_lower + ".pdf"  # So it enters PDF branch below
-            except Exception as e:
-                logger.error(f"Cannot convert Word to PDF: {e}")
-                return {"success": False, "error": f"Gagal mengonversi Word ke format visual: {e}"}
-
-        # ─── BRANCH: PDF / IMAGE ─────────────────────────────────────────
-        if fname_lower.endswith('.pdf'):
-            progress_tracker[session_id]["message"] = "Converting PDF to images..."
-            print(f"\n{'='*60}")
-            print(f"  📄 File   : {file.filename}")
-            print(f"  🔄 Step 1 : Converting PDF to images...")
-            print(f"{'='*60}")
-            images = convert_pdf_to_images_safe(temp_path)
-        else:
-            images = [temp_path]
-
-        total_pages = len(images)
-        progress_tracker[session_id]["total_pages"] = total_pages
-        progress_tracker[session_id]["message"] = f"Processing {total_pages} page(s)..."
-        progress_tracker[session_id]["status"] = "processing"
-
-        print(f"\n  📑 Total  : {total_pages} halaman")
-        print(f"  🔄 Step 2 : Scanning setiap halaman...")
-
-        # Chapter titles lookup (both Indonesian and English)
+        # Chapter titles lookup (both Indonesian and English) — used by all paths
         chapter_titles = {
             "BAB 1": "Tujuan Penggunaan & Keamanan",
             "BAB 2": "Instalasi",
@@ -935,75 +1029,148 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             "Chapter 7": "Warranty & Service"
         }
 
-        # ───── MAIN PROCESSING LOOP ─────────────────────────────────
-        for i, img_src in enumerate(images):
-            current_page = i + 1
-            pct = int((current_page / total_pages) * 100)
+        # ─── BRANCH: DOCX / DOC (DIRECT READ — No OCR!) ─────────────────
+        use_direct_docx = False
+        use_direct_pdf = False
+
+        if fname_lower.endswith('.docx') and DIRECT_READER_AVAILABLE:
+            print(f"\n{'='*60}")
+            print(f"  📝 File   : {file.filename}")
+            print(f"  ⚡ Mode   : DIRECT READ (No OCR — 100% accurate)")
+            print(f"{'='*60}")
 
             progress_tracker[session_id].update({
                 "status": "processing",
-                "current_page": current_page,
-                "percentage": pct,
-                "message": f"Processing page {current_page} of {total_pages}..."
+                "message": "Reading Word document directly (no OCR needed)...",
+                "percentage": 10,
             })
-            _print_progress(current_page, total_pages, f"Hal. {current_page}/{total_pages}  ({pct}%)")
-            logger.info(f"Processing page {current_page}/{total_pages}")
 
-            # Resolve image path
-            page_path = img_src
-            if not isinstance(img_src, str):
-                page_path = os.path.join(BASE_PATH, f"page_{i}.png")
-                img_src.save(page_path, "PNG")
-
-            # ── Column detection: split multi-column pages ──
             try:
-                col_paths = _split_columns_simple(page_path, f"{file.filename}_{i}")
-            except Exception as e:
-                logger.warning(f"Column split failed (non-fatal): {e}")
-                col_paths = [page_path]
-
-            if len(col_paths) > 1:
-                logger.info(f"📊 Page {current_page}: split into {len(col_paths)} columns")
-
-            # ── Process each column (or full page if single column) ──
-            for col_idx, col_path in enumerate(col_paths):
-                col_suffix = f"_col{col_idx}" if len(col_paths) > 1 else ""
-
-                # A. THE EYE (Scan) — pass language for OCR engine selection
-                scan_result = vision_module.scan_document(
-                    col_path, f"{file.filename}_{i}{col_suffix}", lang=doc_language
-                )
-
-                # Handle return format
-                if isinstance(scan_result, list):
-                    layout_elements = scan_result
-                    clean_img_url = None
+                direct_elements = extract_docx_direct(temp_path, lang=doc_language)
+                if direct_elements:
+                    use_direct_docx = True
+                    logger.info(f"✅ DOCX Direct Read: {len(direct_elements)} elements extracted")
                 else:
-                    layout_elements = scan_result.get('elements', [])
-                    clean_path = scan_result.get('clean_image_path')
-                    if clean_path and os.path.exists(clean_path):
-                        from urllib.parse import quote
-                        fname_base = os.path.basename(clean_path)
-                        clean_img_url = f"http://127.0.0.1:8000/output/{quote(fname_base)}"
-                        clean_pages_urls.append(clean_img_url)
-                        col_label = f"page {current_page} col {col_idx+1}" if len(col_paths) > 1 else f"page {current_page}"
-                        logger.info(f"📷 Preview {col_label}: {clean_img_url}")
-                    else:
-                        clean_img_url = None
+                    logger.warning("⚠️ DOCX Direct Read returned empty — falling back to OCR")
+            except Exception as e:
+                logger.warning(f"⚠️ DOCX Direct Read failed: {e} — falling back to OCR")
 
-                # B. THE BRAIN (Classify + Normalize) — per column
-                for element in layout_elements:
+        if fname_lower.endswith('.doc') and not use_direct_docx:
+            # .doc format needs conversion to PDF first (python-docx only supports .docx)
+            print(f"\n{'='*60}")
+            print(f"  📝 File   : {file.filename}")
+            print(f"  🔄 Step 1 : Converting .doc to PDF for scanning...")
+            print(f"{'='*60}")
+            progress_tracker[session_id].update({
+                "status": "processing",
+                "message": "Converting .doc to PDF...",
+                "percentage": 10,
+            })
+            from docx2pdf import convert
+            pdf_path = temp_path + ".pdf"
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                convert(temp_path, pdf_path)
+                temp_path = pdf_path
+                fname_lower = fname_lower + ".pdf"
+            except Exception as e:
+                logger.error(f"Cannot convert .doc to PDF: {e}")
+                return {"success": False, "error": f"Gagal mengonversi .doc: {e}"}
+
+        if not use_direct_docx and fname_lower.endswith('.docx'):
+            # DOCX direct read failed — convert to PDF and try OCR
+            print(f"  🔄 Fallback: Converting DOCX to PDF for OCR...")
+            progress_tracker[session_id].update({
+                "status": "processing",
+                "message": "Converting Word to PDF for OCR fallback...",
+                "percentage": 10,
+            })
+            from docx2pdf import convert
+            pdf_path = temp_path + ".pdf"
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                convert(temp_path, pdf_path)
+                temp_path = pdf_path
+                fname_lower = fname_lower + ".pdf"
+            except Exception as e:
+                logger.error(f"Cannot convert Word to PDF: {e}")
+                return {"success": False, "error": f"Gagal mengonversi Word ke format visual: {e}"}
+
+        # ─── BRANCH: PDF — auto-detect text vs scanned ────────────────────
+        if not use_direct_docx and fname_lower.endswith('.pdf'):
+            # Check if PDF is text-based
+            if DIRECT_READER_AVAILABLE:
+                pdf_info = is_text_pdf(temp_path)
+                if pdf_info['is_text_based']:
+                    print(f"\n{'='*60}")
+                    print(f"  📄 File   : {file.filename}")
+                    print(f"  ⚡ Mode   : PDF DIRECT READ (text-based, no OCR needed)")
+                    print(f"  📊 Info   : {pdf_info['avg_chars_per_page']} chars/page, {pdf_info['total_pages']} pages")
+                    print(f"{'='*60}")
+
+                    progress_tracker[session_id].update({
+                        "status": "processing",
+                        "message": "Reading PDF text directly (no OCR needed)...",
+                        "percentage": 15,
+                    })
+
+                    try:
+                        pdf_result = extract_pdf_direct(temp_path, lang=doc_language)
+                        if pdf_result and pdf_result.get('pages'):
+                            use_direct_pdf = True
+                            logger.info(f"✅ PDF Direct Read: {len(pdf_result['pages'])} pages")
+                    except Exception as e:
+                        logger.warning(f"⚠️ PDF Direct Read failed: {e} — falling back to OCR")
+
+            # Fallback: scanned PDF → convert to images for OCR
+            if not use_direct_pdf:
+                progress_tracker[session_id]["message"] = "Converting PDF to images for OCR..."
+                print(f"\n{'='*60}")
+                print(f"  📄 File   : {file.filename}")
+                print(f"  🔍 Mode   : OCR (scanned/image-based PDF)")
+                print(f"  🔄 Step 1 : Converting PDF to images...")
+                print(f"{'='*60}")
+                images = convert_pdf_to_images_safe(temp_path)
+        elif not use_direct_docx:
+            images = [temp_path]
+
+        # ═══════════════════════════════════════════════════════════════
+        # DIRECT READ PATH — DOCX or text-based PDF (no OCR)
+        # ═══════════════════════════════════════════════════════════════
+        if use_direct_docx:
+            # ── Process DOCX elements directly ──
+            total_pages = 1  # DOCX treated as single "page"
+            progress_tracker[session_id].update({
+                "total_pages": total_pages,
+                "status": "processing",
+                "message": f"Processing {len(direct_elements)} extracted elements...",
+                "percentage": 40,
+            })
+
+            print(f"\n  📑 Elements: {len(direct_elements)}")
+            print(f"  🔄 Step 2 : Classifying & normalizing...")
+
+            for element in direct_elements:
+                if direct_translate:
+                    corrected = element['text']
+                    highlights = []
+                    normalized_result = {
+                        'original': corrected,
+                        'corrected': corrected,
+                        'typos': 0,
+                        'has_typo': False
+                    }
+                    bab_id = "Chapter 1" if doc_language == 'en' else "BAB 1"
+                    bab_title = "Translated Content" if doc_language == 'en' else "Konten Terjemahan"
+                    elem_lang = doc_language
+                else:
                     normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
-                    # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
-                    correction_result = apply_text_correction_with_highlights(
-                        normalized_result['corrected'], lang=doc_language
-                    )
-                    corrected  = correction_result['text']
-                    highlights = correction_result['highlights']
-                    element['text'] = corrected
-                    normalized_result['corrected'] = corrected
+                    # No OCR correction needed — text is already 100% accurate
+                    corrected = normalized_result['corrected']
+                    highlights = []
 
-                    # Detect element language (from AI or auto-detect from text)
                     elem_lang = element.get('lang', '')
                     if not elem_lang:
                         txt_lower = element['text'].lower()
@@ -1013,14 +1180,12 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                         en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
                         elem_lang = 'en' if en_hits >= 2 else 'id'
 
-                    # Use AI-provided chapter if available, else fallback to BioBrain
                     bab_id = element.get('chapter', '')
                     if bab_id and bab_id in chapter_titles:
                         bab_title = chapter_titles[bab_id]
                     else:
                         bab_id, bab_title = brain_module.semantic_mapping(element)
 
-                    # Remap BAB→Chapter or Chapter→BAB based on selected language
                     if doc_language == 'en' and bab_id.startswith('BAB '):
                         bab_num = bab_id.replace('BAB ', '')
                         new_key = f"Chapter {bab_num}"
@@ -1034,44 +1199,342 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                             bab_id = new_key
                             bab_title = chapter_titles[new_key]
 
+                _clean_original = enforce_language(normalized_result['original'], lang=doc_language)
+                _clean_normalized = enforce_language(normalized_result['corrected'], lang=doc_language)
+
+                structured_data.append({
+                    "chapter_id"    : bab_id,
+                    "chapter_title" : bab_title,
+                    "type"          : element['type'],
+                    "original"      : _clean_original,
+                    "normalized"    : _clean_normalized,
+                    "typos"         : normalized_result.get('typos', 0),
+                    "has_typo"      : normalized_result.get('has_typo', False),
+                    "text_confidence": element.get('confidence', 1.0),
+                    "match_score"   : 100,
+                    "lang"          : elem_lang,
+                    "crop_url"      : element.get('crop_url'),
+                    "crop_local"    : element.get('crop_local'),
+                    "source_image_local": None,
+                    "bbox"          : element.get('bbox'),
+                    "highlights"    : highlights,
+                    "_direct_read"  : True,
+                })
+
+            progress_tracker[session_id]["percentage"] = 80
+            print(f"  ✅ Direct read complete: {len(structured_data)} elements")
+
+        elif use_direct_pdf:
+            # ── Process PDF pages via direct text extraction ──
+            pdf_pages = pdf_result['pages']
+            total_pages = len(pdf_pages)
+            progress_tracker[session_id].update({
+                "total_pages": total_pages,
+                "status": "processing",
+                "message": f"Processing {total_pages} page(s) (direct read)...",
+                "percentage": 20,
+            })
+
+            print(f"\n  📑 Total  : {total_pages} halaman (direct read)")
+            print(f"  🔄 Step 2 : Classifying & normalizing...")
+
+            # Also convert PDF to images for preview & figure crop
+            try:
+                preview_images = convert_pdf_to_images_safe(temp_path)
+            except Exception:
+                preview_images = []
+
+            for page_data in pdf_pages:
+                page_num = page_data['page_num']
+                page_elements = page_data.get('elements', [])
+
+                if not page_elements:
+                    continue
+
+                pct = int(((page_num + 1) / total_pages) * 80) + 20
+                progress_tracker[session_id].update({
+                    "current_page": page_num + 1,
+                    "percentage": min(pct, 90),
+                    "message": f"Processing page {page_num + 1} of {total_pages} (direct read)...",
+                })
+                _print_progress(page_num + 1, total_pages, f"Hal. {page_num+1}/{total_pages}")
+
+                # Save preview image for this page
+                preview_path = None
+                if page_num < len(preview_images):
+                    pimg = preview_images[page_num]
+                    preview_fname = f"PREVIEW_{file.filename}_{page_num}.jpg"
+                    preview_path = os.path.join(OUTPUT_DIR, preview_fname)
+                    if not isinstance(pimg, str):
+                        pimg.save(preview_path, "JPEG", quality=90)
+                    else:
+                        import shutil as sh
+                        sh.copy2(pimg, preview_path)
+                    from urllib.parse import quote
+                    clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(preview_fname)}")
+
+                # Crop figures/tables from preview image
+                original_img = None
+                if preview_path and os.path.exists(preview_path):
+                    original_img = cv2.imread(preview_path)
+
+                for elem_idx, element in enumerate(page_elements):
+                    # Crop visual elements (table/figure) from preview image
+                    if element['type'] in ('table', 'figure') and original_img is not None:
+                        h_img, w_img = original_img.shape[:2]
+                        # Scale pdfplumber coords (72 DPI) to image coords (300 DPI)
+                        # pdfplumber uses PDF points; preview images are at 300 DPI
+                        scale = w_img / 612  # Approx — standard US Letter width = 612pt
+                        bx1 = max(0, int(element['bbox'][0] * scale) - 10)
+                        by1 = max(0, int(element['bbox'][1] * scale) - 10)
+                        bx2 = min(w_img, int(element['bbox'][2] * scale) + 10)
+                        by2 = min(h_img, int(element['bbox'][3] * scale) + 10)
+
+                        if bx2 > bx1 and by2 > by1:
+                            crop_visual = original_img[by1:by2, bx1:bx2]
+                            if crop_visual.size > 0:
+                                crop_fname = f"{file.filename}_{page_num}_crop_{element['type']}_{elem_idx}.png"
+                                crop_path = os.path.join(OUTPUT_DIR, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+                                from urllib.parse import quote
+                                element['crop_url'] = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                                element['crop_local'] = crop_path
+
+                    if direct_translate:
+                        corrected = element['text']
+                        highlights = []
+                        normalized_result = {
+                            'original': corrected,
+                            'corrected': corrected,
+                            'typos': 0,
+                            'has_typo': False
+                        }
+                        bab_id = "Chapter 1" if doc_language == 'en' else "BAB 1"
+                        bab_title = "Translated Content" if doc_language == 'en' else "Konten Terjemahan"
+                        elem_lang = doc_language
+                    else:
+                        normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
+                        corrected = normalized_result['corrected']
+                        highlights = []
+
+                        elem_lang = element.get('lang', '')
+                        if not elem_lang:
+                            txt_lower = element['text'].lower()
+                            en_keywords = ['the', 'and', 'for', 'user', 'manual', 'this', 'with', 'installation',
+                                           'operation', 'maintenance', 'warning', 'caution', 'chapter',
+                                           'table', 'figure', 'if', 'is', 'are', 'can', 'not', 'may']
+                            en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
+                            elem_lang = 'en' if en_hits >= 2 else 'id'
+
+                        bab_id = element.get('chapter', '')
+                        if bab_id and bab_id in chapter_titles:
+                            bab_title = chapter_titles[bab_id]
+                        else:
+                            bab_id, bab_title = brain_module.semantic_mapping(element)
+
+                        if doc_language == 'en' and bab_id.startswith('BAB '):
+                            bab_num = bab_id.replace('BAB ', '')
+                            new_key = f"Chapter {bab_num}"
+                            if new_key in chapter_titles:
+                                bab_id = new_key
+                                bab_title = chapter_titles[new_key]
+                        elif doc_language == 'id' and bab_id.startswith('Chapter '):
+                            bab_num = bab_id.replace('Chapter ', '')
+                            new_key = f"BAB {bab_num}"
+                            if new_key in chapter_titles:
+                                bab_id = new_key
+                                bab_title = chapter_titles[new_key]
+
+                    _clean_original = enforce_language(normalized_result['original'], lang=doc_language)
+                    _clean_normalized = enforce_language(normalized_result['corrected'], lang=doc_language)
+
                     structured_data.append({
                         "chapter_id"    : bab_id,
                         "chapter_title" : bab_title,
                         "type"          : element['type'],
-                        "original"      : normalized_result['original'],
-                        "normalized"    : normalized_result['corrected'],
-                        "typos"         : normalized_result['typos'],
-                        "has_typo"      : normalized_result['has_typo'],
+                        "original"      : _clean_original,
+                        "normalized"    : _clean_normalized,
+                        "typos"         : normalized_result.get('typos', 0),
+                        "has_typo"      : normalized_result.get('has_typo', False),
                         "text_confidence": element.get('confidence', 1.0),
                         "match_score"   : 100,
                         "lang"          : elem_lang,
                         "crop_url"      : element.get('crop_url'),
                         "crop_local"    : element.get('crop_local'),
-                        "source_image_local": element.get('source_image_local'),
+                        "source_image_local": preview_path,
                         "bbox"          : element.get('bbox'),
                         "highlights"    : highlights,
+                        "_direct_read"  : True,
                     })
 
-            # Cleanup temp page image
-            # We skip this if we need it, but actually the vision_engine saves a PREVIEW image.
-            # So deleting the temp PNG page_path is fine.
-            if not isinstance(img_src, str):
-                for attempt in range(3):
-                    try:
-                        if os.path.exists(page_path):
-                            os.remove(page_path)
-                        break
-                    except PermissionError:
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
+            print(f"  ✅ PDF direct read complete: {len(structured_data)} elements")
+
+        else:
+            # ═══════════════════════════════════════════════════════════════
+            # OCR PATH — original pipeline for scanned documents
+            # ═══════════════════════════════════════════════════════════════
+            total_pages = len(images)
+            progress_tracker[session_id]["total_pages"] = total_pages
+            progress_tracker[session_id]["message"] = f"Processing {total_pages} page(s)..."
+            progress_tracker[session_id]["status"] = "processing"
+
+            print(f"\n  📑 Total  : {total_pages} halaman")
+            print(f"  🔄 Step 2 : Scanning setiap halaman (OCR)...")
+
+            # ───── MAIN OCR PROCESSING LOOP ─────────────────────────────────
+            for i, img_src in enumerate(images):
+                current_page = i + 1
+                pct = int((current_page / total_pages) * 100)
+
+                progress_tracker[session_id].update({
+                    "status": "processing",
+                    "current_page": current_page,
+                    "percentage": pct,
+                    "message": f"Processing page {current_page} of {total_pages}..."
+                })
+                _print_progress(current_page, total_pages, f"Hal. {current_page}/{total_pages}  ({pct}%)")
+                logger.info(f"Processing page {current_page}/{total_pages}")
+
+                # Resolve image path
+                page_path = img_src
+                if not isinstance(img_src, str):
+                    page_path = os.path.join(BASE_PATH, f"page_{i}.png")
+                    img_src.save(page_path, "PNG")
+
+                # ── Column detection: split multi-column pages ──
+                try:
+                    col_paths = _split_columns_simple(page_path, f"{file.filename}_{i}")
+                except Exception as e:
+                    logger.warning(f"Column split failed (non-fatal): {e}")
+                    col_paths = [page_path]
+
+                if len(col_paths) > 1:
+                    logger.info(f"📊 Page {current_page}: split into {len(col_paths)} columns")
+
+                # ── Process each column (or full page if single column) ──
+                for col_idx, col_path in enumerate(col_paths):
+                    col_suffix = f"_col{col_idx}" if len(col_paths) > 1 else ""
+
+                    # A. THE EYE (Scan) — pass language for OCR engine selection
+                    scan_result = vision_module.scan_document(
+                        col_path, f"{file.filename}_{i}{col_suffix}", lang=doc_language, direct_translate=direct_translate
+                    )
+
+                    # Handle return format
+                    if isinstance(scan_result, list):
+                        layout_elements = scan_result
+                        clean_img_url = None
+                    else:
+                        layout_elements = scan_result.get('elements', [])
+                        clean_path = scan_result.get('clean_image_path')
+                        if clean_path and os.path.exists(clean_path):
+                            from urllib.parse import quote
+                            fname_base = os.path.basename(clean_path)
+                            clean_img_url = f"http://127.0.0.1:8000/output/{quote(fname_base)}"
+                            clean_pages_urls.append(clean_img_url)
+                            col_label = f"page {current_page} col {col_idx+1}" if len(col_paths) > 1 else f"page {current_page}"
+                            logger.info(f"📷 Preview {col_label}: {clean_img_url}")
+                        else:
+                            clean_img_url = None
+
+                    # B. THE BRAIN (Classify + Normalize) — per column
+                    for element in layout_elements:
+                        if direct_translate:
+                            corrected = element['text']
+                            highlights = []
+                            normalized_result = {
+                                'original': corrected,
+                                'corrected': corrected,
+                                'typos': 0,
+                                'has_typo': False
+                            }
+                            # Bypass standardization, put all inside initial chapter
+                            bab_id = "Chapter 1" if doc_language == 'en' else "BAB 1"
+                            bab_title = "Translated Content" if doc_language == 'en' else "Konten Terjemahan"
+                            elem_lang = doc_language
+                            element['text'] = corrected
+                        else:
+                            normalized_result = brain_module.normalize_text(element['text'], lang=doc_language)
+                            # Terapkan text_corrector SETELAH BioBrain — gunakan versi highlights
+                            correction_result = apply_text_correction_with_highlights(
+                                normalized_result['corrected'], lang=doc_language
+                            )
+                            corrected  = correction_result['text']
+                            highlights = correction_result['highlights']
+                            element['text'] = corrected
+                            normalized_result['corrected'] = corrected
+
+                            # Detect element language (from AI or auto-detect from text)
+                            elem_lang = element.get('lang', '')
+                            if not elem_lang:
+                                txt_lower = element['text'].lower()
+                                en_keywords = ['the', 'and', 'for', 'user', 'manual', 'this', 'with', 'installation',
+                                               'operation', 'maintenance', 'warning', 'caution', 'chapter',
+                                               'table', 'figure', 'if', 'is', 'are', 'can', 'not', 'may']
+                                en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {txt_lower} ')
+                                elem_lang = 'en' if en_hits >= 2 else 'id'
+
+                            # Use AI-provided chapter if available, else fallback to BioBrain
+                            bab_id = element.get('chapter', '')
+                            if bab_id and bab_id in chapter_titles:
+                                bab_title = chapter_titles[bab_id]
+                            else:
+                                bab_id, bab_title = brain_module.semantic_mapping(element)
+
+                            # Remap BAB→Chapter or Chapter→BAB based on selected language
+                            if doc_language == 'en' and bab_id.startswith('BAB '):
+                                bab_num = bab_id.replace('BAB ', '')
+                                new_key = f"Chapter {bab_num}"
+                                if new_key in chapter_titles:
+                                    bab_id = new_key
+                                    bab_title = chapter_titles[new_key]
+                            elif doc_language == 'id' and bab_id.startswith('Chapter '):
+                                bab_num = bab_id.replace('Chapter ', '')
+                                new_key = f"BAB {bab_num}"
+                                if new_key in chapter_titles:
+                                    bab_id = new_key
+                                    bab_title = chapter_titles[new_key]
+
+                        # ── Enforce target language on ALL text fields ──
+                        _clean_original = enforce_language(normalized_result['original'], lang=doc_language)
+                        _clean_normalized = enforce_language(normalized_result['corrected'], lang=doc_language)
+
+                        structured_data.append({
+                            "chapter_id"    : bab_id,
+                            "chapter_title" : bab_title,
+                            "type"          : element['type'],
+                            "original"      : _clean_original,
+                            "normalized"    : _clean_normalized,
+                            "typos"         : normalized_result['typos'],
+                            "has_typo"      : normalized_result['has_typo'],
+                            "text_confidence": element.get('confidence', 1.0),
+                            "match_score"   : 100,
+                            "lang"          : elem_lang,
+                            "crop_url"      : element.get('crop_url'),
+                            "crop_local"    : element.get('crop_local'),
+                            "source_image_local": element.get('source_image_local'),
+                            "bbox"          : element.get('bbox'),
+                            "highlights"    : highlights,
+                        })
+
+                # Cleanup temp page image
+                if not isinstance(img_src, str):
+                    for attempt in range(3):
+                        try:
+                            if os.path.exists(page_path):
+                                os.remove(page_path)
+                            break
+                        except PermissionError:
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
         # ── STEP 2.6: AI Cover Page Extraction ─────────────────────────
         # Extract product name & description strictly from the first page (cover) using AI
         first_page_image_path = None
         for img in clean_pages_urls:
             filename = img.split('/')[-1]
             local_path = os.path.join(OUTPUT_DIR, filename)
-            if "_0.png" in filename and os.path.exists(local_path):
+            if ("_0.jpg" in filename or "_0_col0.jpg" in filename or "_0.png" in filename) and os.path.exists(local_path):
                 first_page_image_path = local_path
                 break
         
@@ -1182,8 +1645,9 @@ Respond ONLY with a valid pure JSON object in this exact format, with NO markdow
         
         result = architect_module.build_report(structured_data, file.filename, lang=doc_language)
         
-        word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
-        pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result['pdf_file'] else None
+        from urllib.parse import quote
+        word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
+        pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result['pdf_file'] else None
         
         # Mark as complete
         _print_progress(total_pages, total_pages, "✅ SELESAI!")
@@ -1287,6 +1751,8 @@ RULES:
 - Maintain the same formatting (headings stay as headings)
 - Return ONLY the translations with numbering, nothing else
 
+{get_language_instruction('id')}
+
 Texts to translate:
 {batch_text}"""
             
@@ -1324,7 +1790,8 @@ Texts to translate:
                 for i, (idx, original_text) in enumerate(batch):
                     batch_num = i + 1
                     if batch_num in translations:
-                        translated = translations[batch_num].strip()
+                        # Enforce target language on translated text
+                        translated = enforce_language(translations[batch_num], lang='id')
                         if translated:
                             structured_data[idx]['original_en'] = structured_data[idx].get('normalized', '')
                             structured_data[idx]['normalized'] = translated
@@ -1363,8 +1830,9 @@ Texts to translate:
         
         # Regenerate Word/PDF with translated text
         result = architect_module.build_report(structured_data, session["original_filename"], lang='id')
-        word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
-        pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result.get('pdf_file') else None
+        from urllib.parse import quote
+        word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
+        pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result.get('pdf_file') else None
         
         return {
             "success": True,
@@ -1489,8 +1957,8 @@ async def supplement_workflow(
                         "chapter_id"    : bab_id,
                         "chapter_title" : bab_title,
                         "type"          : element['type'],
-                        "original"      : normalized_result['original'],
-                        "normalized"    : normalized_result['corrected'],
+                        "original"      : enforce_language(normalized_result['original'], lang=supp_lang),
+                        "normalized"    : enforce_language(normalized_result['corrected'], lang=supp_lang),
                         "typos"         : normalized_result['typos'],
                         "has_typo"      : normalized_result['has_typo'],
                         "text_confidence": element.get('confidence', 1.0),
@@ -1525,8 +1993,9 @@ async def supplement_workflow(
         progress_tracker[session_id]["message"] = "Regenerating reports with merged data..."
         result = architect_module.build_report(combined_data, base_filename)
         
-        word_url = f"http://127.0.0.1:8000/files/{result['word_file']}"
-        pdf_url = f"http://127.0.0.1:8000/files/{result['pdf_file']}" if result['pdf_file'] else None
+        from urllib.parse import quote
+        word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
+        pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result['pdf_file'] else None
         
         progress_tracker[session_id].update({
             "status": "complete",
