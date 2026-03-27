@@ -422,6 +422,7 @@ async def check_chapter_completeness(req: CheckCompletenessRequest):
     try:
         from openrouter_client import get_openrouter_client
         import base64
+        import re
         
         # 1. Collect unique source images for this chapter
         source_images = set()
@@ -649,6 +650,21 @@ def _quick_extract_text(file_path: str, fname_lower: str) -> str:
                     paragraphs.append(para.text.strip())
                 if sum(len(p) for p in paragraphs) > 800:
                     break
+            
+            # If still not enough text, check tables (manuals often use tables for layout)
+            if sum(len(p) for p in paragraphs) < 100:
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                paragraphs.append(cell.text.strip())
+                            if sum(len(p) for p in paragraphs) > 800:
+                                break
+                        if sum(len(p) for p in paragraphs) > 800:
+                            break
+                    if sum(len(p) for p in paragraphs) > 800:
+                        break
+                        
             text = ' '.join(paragraphs)
 
         # PDF — extract embedded text with PyPDF2 (no OCR needed for text PDFs)
@@ -817,6 +833,23 @@ def _detect_lang_with_ai(file_path: str, fname_lower: str) -> dict:
                     temp_images.append(img_path)
             except Exception as e:
                 logger.warning(f"AI lang-detect: DOCX→PDF conversion failed: {e}")
+                # Fallback: extract first image directly from docx ZIP
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(file_path, 'r') as z:
+                        media_files = [f for f in z.namelist() if f.startswith('word/media/')]
+                        for media_path in sorted(media_files):
+                            ext = os.path.splitext(media_path)[1].lower()
+                            if ext in ('.png', '.jpg', '.jpeg'):
+                                img_data = z.read(media_path)
+                                img_path = os.path.join(BASE_PATH, f"_langdetect_ai_page{ext}")
+                                with open(img_path, 'wb') as f:
+                                    f.write(img_data)
+                                image_path = img_path
+                                temp_images.append(img_path)
+                                break
+                except Exception as e2:
+                    logger.warning(f"AI lang-detect: Direct DOCX image extraction failed: {e2}")
 
         elif fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
             image_path = file_path
@@ -970,8 +1003,11 @@ async def detect_language(file: UploadFile = File(...)):
             "message"    : f"Tidak dapat mendeteksi bahasa: {str(e)}"
         }
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception as e:
+            logger.warning(f"Could not remove lang-detect temp file: {e}")
 
 
 @app.post("/process")
@@ -1032,6 +1068,7 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
         # ─── BRANCH: DOCX / DOC (DIRECT READ — No OCR!) ─────────────────
         use_direct_docx = False
         use_direct_pdf = False
+        images = []
 
         if fname_lower.endswith('.docx') and DIRECT_READER_AVAILABLE:
             print(f"\n{'='*60}")
@@ -1622,7 +1659,8 @@ Respond ONLY with a valid pure JSON object in this exact format, with NO markdow
                     break
                 if item.get('type') in ('title', 'heading'):
                     text = (item.get('normalized', '') or '').strip()
-                    is_first_page = f"{file.filename}_0" in item.get('source_image_local', '')
+                    source_image = item.get('source_image_local') or ''
+                    is_first_page = f"{file.filename}_0" in source_image
                     if is_first_page and len(text) < 40 and not any(kw in text.lower() for kw in ('manual', 'table of contents')):
                         item['is_cover'] = True
                         cover_count += 1
@@ -1675,8 +1713,11 @@ Respond ONLY with a valid pure JSON object in this exact format, with NO markdow
         traceback.print_exc()
         return {"success": False, "error": str(e)}
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception as e:
+            logger.warning(f"Could not remove temp file {temp_path}: {e}")
 
         # Store session data for potential supplementary uploads
         if structured_data and session_id:

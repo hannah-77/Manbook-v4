@@ -260,6 +260,34 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
     # Check for images that are standalone (not already captured)
     _extract_docx_images(doc, docx_path, elements)
     
+    # ── Merge consecutive elements of the same type ──
+    merged_elements = []
+    for el in elements:
+        if not merged_elements:
+            merged_elements.append(el)
+            continue
+        
+        last_el = merged_elements[-1]
+        
+        # Merge if both are text elements of the same type (heading or paragraph)
+        if last_el['type'] == el['type'] and el['type'] in ('heading', 'paragraph'):
+            # Merge text with newline
+            last_el['text'] = last_el['text'] + "\n" + el['text']
+            
+            # Combine bounding boxes (min x, min y, max x, max y)
+            bb1 = last_el.get('bbox', [0, 0, 0, 0])
+            bb2 = el.get('bbox', [0, 0, 0, 0])
+            last_el['bbox'] = [
+                min(bb1[0], bb2[0]),
+                min(bb1[1], bb2[1]),
+                max(bb1[2], bb2[2]),
+                max(bb1[3], bb2[3])
+            ]
+        else:
+            merged_elements.append(el)
+            
+    elements = merged_elements
+    
     logger.info(
         f"✅ DOCX Direct Reader: {len(elements)} elements "
         f"({sum(1 for e in elements if e['type'] == 'heading')} headings, "
@@ -391,12 +419,22 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
             elements = []
             
             # ── Extract text with position info ──
-            words = page.extract_words(
+            raw_words = page.extract_words(
                 x_tolerance=3,
                 y_tolerance=3,
                 keep_blank_chars=False,
                 extra_attrs=['fontname', 'size']
             )
+            
+            # ── Filter out headers and footers ──
+            # Standard PDF height is ~792 points (11 inches). Top/bottom 60pt is ~0.8 inches.
+            header_margin = min(60, page.height * 0.08)
+            footer_margin = max(page.height - 60, page.height * 0.92)
+            words = []
+            for w in raw_words:
+                y_center = (w['top'] + w['bottom']) / 2
+                if header_margin < y_center < footer_margin:
+                    words.append(w)
             
             if not words:
                 pages_result.append({

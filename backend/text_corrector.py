@@ -417,6 +417,30 @@ _CONTEXT_RULES = [
         "triggers": ["pt", "perusahaan", "produk", "company", "manufacturer", "buatan", "oleh", "by"],
         "lang": "en",
     },
+    {
+        "target": "sink",
+        "correct": "SINKO",
+        "triggers": ["pt", "prime", "prima", "alloy", "copyright"],
+        "lang": "id",
+    },
+    {
+        "target": "sink",
+        "correct": "SINKO",
+        "triggers": ["pt", "prime", "prima", "alloy", "copyright"],
+        "lang": "en",
+    },
+    {
+        "target": "prime",
+        "correct": "PRIMA",
+        "triggers": ["pt", "sink", "sinko", "alloy"],
+        "lang": "id",
+    },
+    {
+        "target": "prime",
+        "correct": "PRIMA",
+        "triggers": ["pt", "sink", "sinko", "alloy"],
+        "lang": "en",
+    },
 ]
 
 
@@ -500,6 +524,7 @@ def _stage_b_context(text: str, lang: str = "id", window_size: int = 5) -> str:
 _ENTITY_MAP_ID = {
     # ── Brand & nama perusahaan ──────────────────────────────────
     "STINKO"      : "SINKO",
+    "sinko"       : "SINKO",
     "PRIMAL"      : "PRIMA",
     "TECHNOVISON" : "TECHNOVISION",
     "Elteeh"      : "Elitech",      

@@ -1067,6 +1067,18 @@ Output ONLY the JSON array, nothing else."""
             except Exception as e:
                 logger.error(f"Full-page OCR failed: {e}")
 
+            # ── Auto-filter Headers and Footers ──
+            # Ignore elements whose center is in the top 6% or bottom 6% of the image (typical header/footer zones)
+            filtered_elements = []
+            header_margin = h * 0.06
+            footer_margin = h * 0.94
+            for e in elements:
+                y_center = (e['bbox'][1] + e['bbox'][3]) / 2
+                if header_margin < y_center < footer_margin:
+                    filtered_elements.append(e)
+            
+            elements = filtered_elements
+
             # Sort all elements by vertical position (reading order)
             elements.sort(key=lambda e: e['bbox'][1])
 

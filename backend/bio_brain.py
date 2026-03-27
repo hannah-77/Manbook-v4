@@ -130,11 +130,9 @@ class BioBrain:
         if lang != 'id':
             words_list = cleaned.split()
             final_words = []
-            try:
-                spell_words = list(self.spell.word_frequency.words())
-            except Exception:
-                spell_words = []
-            vocab_set = set(spell_words + list(self.taxonomy.keys()))
+            # Only fuzzy match against taxonomy keys to prevent infinite loops.
+            # Actual spell checking occurs later via self.spell.correction()
+            vocab_set = set(self.taxonomy.keys())
 
             for w in words_list:
                 if w.lower() in vocab_set or (self.spell and w.lower() in self.spell):
