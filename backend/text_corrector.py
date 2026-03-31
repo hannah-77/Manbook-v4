@@ -570,7 +570,7 @@ _ENTITY_MAP_EN = {
     "STINKO"      : "SINKO",
     "PRIMAL"      : "PRIMA",
     "TECHNOVISON" : "TECHNOVISION",
-    "Elteeh"      : "Elitech",      
+    "Elteeh"      : "Elitech",       
     "ELTEEH"      : "ELITECH",
     "Eltechf"     : "Elitech",
     "Elitecho"    : "Elitech",
