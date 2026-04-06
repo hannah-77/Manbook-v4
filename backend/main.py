@@ -9,6 +9,7 @@ Modules:
   - vision_engine.py   → BioVisionHybrid (OCR + layout detection + AI classification)
   - openrouter_client.py → OpenRouter API client
 
+// haii
 Updated: February 2026
 """
 
