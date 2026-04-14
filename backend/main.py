@@ -21,6 +21,7 @@ import shutil
 import logging
 import traceback
 import uvicorn
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Request, Form
@@ -291,6 +292,11 @@ def _split_columns_simple(image_path, filename_base):
 @app.get("/health")
 def health():
     return {"status": "BioManual System Online"}
+
+@app.get("/ping")
+def ping():
+    """Frontend health-check alias"""
+    return {"status": "ok"}
 
 class GenerateChapterRequest(BaseModel):
     chapter_id: str
@@ -648,54 +654,99 @@ def _quick_extract_text(file_path: str, fname_lower: str) -> str:
             for para in doc.paragraphs:
                 if para.text.strip():
                     paragraphs.append(para.text.strip())
-                if sum(len(p) for p in paragraphs) > 800:
+                if sum(len(p) for p in paragraphs) > 1000:
                     break
             
-            # If still not enough text, check tables (manuals often use tables for layout)
+            # If still not enough text, check tables
             if sum(len(p) for p in paragraphs) < 100:
                 for table in doc.tables:
                     for row in table.rows:
                         for cell in row.cells:
                             if cell.text.strip():
                                 paragraphs.append(cell.text.strip())
-                            if sum(len(p) for p in paragraphs) > 800:
+                            if sum(len(p) for p in paragraphs) > 1000:
                                 break
-                        if sum(len(p) for p in paragraphs) > 800:
+                        if sum(len(p) for p in paragraphs) > 1000:
                             break
-                    if sum(len(p) for p in paragraphs) > 800:
+                    if sum(len(p) for p in paragraphs) > 1000:
                         break
                         
             text = ' '.join(paragraphs)
 
-        # PDF — extract embedded text with PyPDF2 (no OCR needed for text PDFs)
+        # PDF — extract text using PyMuPDF (fitz) — much faster/better than PyPDF2
         elif fname_lower.endswith('.pdf'):
             try:
-                import PyPDF2
-                with open(file_path, 'rb') as f:
-                    reader = PyPDF2.PdfReader(f)
-                    pages_text = []
-                    for page in reader.pages[:3]:  # First 3 pages only
-                        pages_text.append(page.extract_text() or "")
-                        if sum(len(p) for p in pages_text) > 800:
-                            break
-                    text = ' '.join(pages_text)
-            except Exception:
-                pass  # Will fall back to OCR below
+                import fitz
+                doc = fitz.open(file_path)
+                pages_text = []
+                # First 3 pages
+                for page in doc.pages(0, min(3, len(doc))):
+                    pages_text.append(page.get_text())
+                    if sum(len(p) for p in pages_text) > 1000:
+                        break
+                text = ' '.join(pages_text)
+                doc.close()
+            except Exception as e:
+                logger.warning(f"PyMuPDF quick extract failed: {e}")
+                # Fallback to PyPDF2 if fitz fails
+                try:
+                    import PyPDF2
+                    with open(file_path, 'rb') as f:
+                        reader = PyPDF2.PdfReader(f)
+                        pages_text = []
+                        for page in reader.pages[:3]:
+                            pages_text.append(page.extract_text() or "")
+                            if sum(len(p) for p in pages_text) > 1000:
+                                break
+                        text = ' '.join(pages_text)
+                except:
+                    pass
 
-        # IMAGE — quick OCR on thumbnail (resized for speed)
-        if not text.strip() and fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-            import cv2
-            img = cv2.imread(file_path)
+        # IMAGE or SCANNED PDF — quick OCR on first page
+        if not text.strip():
+            img = None
+            if fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                img = cv2.imread(file_path)
+            elif fname_lower.endswith('.pdf'):
+                # Convert first page of PDF to image for quick OCR
+                try:
+                    import fitz
+                    doc = fitz.open(file_path)
+                    if len(doc) > 0:
+                        pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Slight upscale for OCR
+                        img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+                        img = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR) if pix.n == 3 else cv2.cvtColor(img_data, cv2.COLOR_GRAY2BGR)
+                    doc.close()
+                except Exception as e:
+                    logger.warning(f"fitz PDF-to-image quick ocr failed: {e}")
+
             if img is not None:
                 h, w = img.shape[:2]
-                scale = min(800 / w, 600 / h, 1.0)
+                scale = min(1000 / w, 800 / h, 1.0)
                 if scale < 1.0:
                     img = cv2.resize(img, (int(w * scale), int(h * scale)))
-                from paddleocr import PaddleOCR
-                ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
-                result = ocr.ocr(img, cls=False)
-                if result and result[0]:
-                    text = ' '.join(line[1][0] for line in result[0] if line[1][1] > 0.4)
+                
+                # Use Tesseract if available (v.fast for single block)
+                try:
+                    import pytesseract
+                    # PSM 3 = fully automatic page segmentation
+                    text = pytesseract.image_to_string(img, lang='ind+eng', config='--psm 3 --oem 1')
+                except:
+                    # Fallback to PaddleOCR (use global instance if possible, or init once)
+                    try:
+                        from paddleocr import PaddleOCR
+                        # Look for global vision_module or ocr_engine
+                        global vision_module
+                        if vision_module and hasattr(vision_module, 'ocr_engine'):
+                            ocr = vision_module.ocr_engine
+                        else:
+                            ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                        
+                        result = ocr.ocr(img, cls=False)
+                        if result and result[0]:
+                            text = ' '.join(line[1][0] for line in result[0] if line[1][1] > 0.4)
+                    except:
+                        pass
 
     except Exception as e:
         logger.warning(f"quick_extract_text error: {e}")
@@ -717,7 +768,7 @@ def _detect_lang_from_text(text: str) -> dict:
             "message": "Teks terlalu sedikit untuk mendeteksi bahasa."
         }
 
-    # ── Keyword heuristic (fast, reliable for ID vs EN) ──────────
+    # ── Keyword heuristic: Robust Regex Matching ──────────
     text_lower = text.lower()
     id_keywords = ['dan', 'yang', 'dengan', 'atau', 'untuk', 'pada', 'adalah',
                    'ini', 'itu', 'dari', 'tidak', 'bab', 'halaman', 'serta',
@@ -726,8 +777,11 @@ def _detect_lang_from_text(text: str) -> dict:
                    'chapter', 'page', 'use', 'user', 'manual', 'installation',
                    'operation', 'maintenance', 'warning', 'caution', 'table']
 
-    id_hits = sum(1 for kw in id_keywords if f' {kw} ' in f' {text_lower} ')
-    en_hits = sum(1 for kw in en_keywords if f' {kw} ' in f' {text_lower} ')
+    text_clean = re.sub(r'[^\w\s]', ' ', text_lower)
+    
+    id_hits = sum(1 for kw in id_keywords if re.search(rf'\b{kw}\b', text_clean))
+    en_hits = sum(1 for kw in en_keywords if re.search(rf'\b{kw}\b', text_clean))
+    
     total   = id_hits + en_hits or 1
 
     kw_lang       = 'id' if id_hits >= en_hits else 'en'
@@ -738,8 +792,10 @@ def _detect_lang_from_text(text: str) -> dict:
     ld_confidence = 0.0
     try:
         from langdetect import detect_langs
-        results = detect_langs(text)
-        # Filter to id/en only (langdetect returns ISO codes)
+        # Take a slice for speed and reliability
+        detect_text = text[:2000]
+        results = detect_langs(detect_text)
+        # Filter to id/en only
         for r in results:
             if r.lang in ('id', 'en'):
                 ld_lang = r.lang
@@ -748,8 +804,8 @@ def _detect_lang_from_text(text: str) -> dict:
     except Exception as e:
         logger.warning(f"langdetect error: {e}")
 
-    # ── Combine: keyword heuristic wins if langdetect unclear ────
-    if ld_lang and ld_confidence >= 0.70:
+    # ── Combine: favor keywords if statistical confidence is low ────
+    if ld_lang and ld_confidence >= 0.80:
         final_lang = ld_lang
         final_conf = ld_confidence
     else:
@@ -1296,17 +1352,44 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 })
                 _print_progress(page_num + 1, total_pages, f"Hal. {page_num+1}/{total_pages}")
 
-                # Save preview image for this page
+                # Save preview image for this page (or column)
+                cnum = page_data.get('column_num', 0)
+                tot_cols = page_data.get('total_columns', 1)
                 preview_path = None
+                
                 if page_num < len(preview_images):
                     pimg = preview_images[page_num]
-                    preview_fname = f"PREVIEW_{file.filename}_{page_num}.jpg"
-                    preview_path = os.path.join(OUTPUT_DIR, preview_fname)
-                    if not isinstance(pimg, str):
-                        pimg.save(preview_path, "JPEG", quality=90)
+                    
+                    if tot_cols > 1:
+                        preview_fname = f"PREVIEW_{file.filename}_{page_num}_col{cnum}.jpg"
                     else:
-                        import shutil as sh
-                        sh.copy2(pimg, preview_path)
+                        preview_fname = f"PREVIEW_{file.filename}_{page_num}.jpg"
+                        
+                    preview_path = os.path.join(OUTPUT_DIR, preview_fname)
+                    
+                    if not os.path.exists(preview_path):
+                        # Save full page first if multi-column to allow cropping
+                        if tot_cols > 1:
+                            full_page_path = os.path.join(OUTPUT_DIR, f"FULL_PAGE_{file.filename}_{page_num}.jpg")
+                            if not os.path.exists(full_page_path):
+                                if not isinstance(pimg, str): pimg.save(full_page_path, "JPEG", quality=90)
+                                else: shutil.copy2(pimg, full_page_path)
+                            
+                            try:
+                                # Use visual column splitter to get precise crops
+                                col_crops = _split_columns_simple(full_page_path, f"{file.filename}_{page_num}")
+                                if 0 < cnum <= len(col_crops):
+                                    shutil.copy2(col_crops[cnum-1], preview_path)
+                                else:
+                                    if not isinstance(pimg, str): pimg.save(preview_path, "JPEG", quality=90)
+                                    else: shutil.copy2(pimg, preview_path)
+                            except:
+                                if not isinstance(pimg, str): pimg.save(preview_path, "JPEG", quality=90)
+                                else: shutil.copy2(pimg, preview_path)
+                        else:
+                            if not isinstance(pimg, str): pimg.save(preview_path, "JPEG", quality=90)
+                            else: shutil.copy2(pimg, preview_path)
+                    
                     from urllib.parse import quote
                     clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(preview_fname)}")
 

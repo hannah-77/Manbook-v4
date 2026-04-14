@@ -416,68 +416,166 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
         logger.info(f"📄 PDF Direct Reader: {total_pages} pages")
         
         for page_idx, page in enumerate(pdf.pages):
-            elements = []
-            
-            # ── Extract text with position info ──
-            raw_words = page.extract_words(
-                x_tolerance=3,
-                y_tolerance=3,
-                keep_blank_chars=False,
-                extra_attrs=['fontname', 'size']
-            )
-            
-            # ── Filter out headers and footers ──
-            # Standard PDF height is ~792 points (11 inches). Top/bottom 60pt is ~0.8 inches.
-            header_margin = min(60, page.height * 0.08)
-            footer_margin = max(page.height - 60, page.height * 0.92)
-            words = []
-            for w in raw_words:
-                y_center = (w['top'] + w['bottom']) / 2
-                if header_margin < y_center < footer_margin:
-                    words.append(w)
-            
-            if not words:
-                pages_result.append({
-                    "page_num": page_idx,
-                    "elements": [],
-                    "is_empty": True,
+            # ── Column Detection (Visual) ──
+            # Render page to detect gaps visually (more reliable for manuals)
+            # This allows us to handle 2, 3, or even 4 column layouts without interleaving text.
+            col_boundaries = [0, page.width]
+            try:
+                # Render low-res for speed
+                render = page.to_image(resolution=72)
+                img_cv = cv2.cvtColor(np.array(render.original), cv2.COLOR_RGB2BGR)
+                h_cv, w_cv = img_cv.shape[:2]
+                
+                # Grayscale + Threshold
+                gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                _, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
+                
+                # Vertical projection (percentage of white pixels)
+                margin_y = int(h_cv * 0.1) # Ignore header/footer for column detection
+                roi = binary[margin_y:h_cv-margin_y, :]
+                white_ratio = np.mean(roi == 255, axis=0) # shape (w_cv,)
+                
+                # Smooth
+                kernel = np.ones(max(3, w_cv // 80)) / max(3, w_cv // 80)
+                white_smooth = np.convolve(white_ratio, kernel, mode='same')
+                
+                # Identify gaps (> 95% white)
+                is_gap = white_smooth > 0.95
+                min_gap_w = max(5, int(w_cv * 0.012))
+                
+                gaps = []
+                in_gap = False
+                gs = 0
+                for x in range(w_cv):
+                    if is_gap[x] and not in_gap:
+                        gs = x
+                        in_gap = True
+                    elif not is_gap[x] and in_gap:
+                        gw = x - gs
+                        if gw >= min_gap_w:
+                            gc = gs + gw // 2
+                            # Ignore edges (10% margin)
+                            if w_cv * 0.1 < gc < w_cv * 0.9:
+                                gaps.append(gc * (page.width / w_cv))
+                        in_gap = False
+                
+                if gaps:
+                    col_boundaries = sorted([0] + gaps + [page.width])
+                    logger.info(f"📊 Page {page_idx+1}: detected {len(col_boundaries)-1} columns")
+            except Exception as e:
+                logger.warning(f"Visual column detection failed for page {page_idx+1}: {e}")
+
+            # ── Extract text & elements for EACH column ────────────
+            for col_idx in range(len(col_boundaries) - 1):
+                cx1, cx2 = col_boundaries[col_idx], col_boundaries[col_idx+1]
+                
+                # Buffer for overlap
+                pad = 2
+                crop_bbox = (max(0, cx1 - pad), 0, min(page.width, cx2 + pad), page.height)
+                col_page = page.crop(crop_bbox)
+                
+                col_elements = []
+                
+                # 1. Extract words in THIS column
+                raw_words = col_page.extract_words(
+                    x_tolerance=3, y_tolerance=3, keep_blank_chars=False,
+                    extra_attrs=['fontname', 'size']
+                )
+                
+                # Filter margins
+                header_margin = min(60, page.height * 0.08)
+                footer_margin = max(page.height - 60, page.height * 0.92)
+                words = [w for w in raw_words if header_margin < ((w['top']+w['bottom'])/2) < footer_margin]
+                
+                if words:
+                    # Group words into lines (per column)
+                    lines = _group_words_into_lines(words, page.height)
+                    
+                    # Merge lines into paragraphs
+                    paragraphs = _merge_lines_into_paragraphs(lines, page.width, page.height)
+                    
+                    # Detect headings
+                    avg_fs = np.mean([p['avg_size'] for p in paragraphs if p.get('avg_size')]) if paragraphs else 11
+                    for para in paragraphs:
+                        text = para['text'].strip()
+                        if not text: continue
+                        
+                        etype = "paragraph"
+                        fs = para.get('avg_size', avg_fs)
+                        if fs > avg_fs * 1.2 and len(text) < 100: etype = "heading"
+                        elif text.isupper() and len(text) < 80: etype = "heading"
+                        elif para.get('is_bold') and len(text) < 80: etype = "heading"
+                        
+                        col_elements.append({
+                            "type": etype,
+                            "text": text,
+                            "confidence": 1.0,
+                            "bbox": para['bbox'], # Relative to page
+                        })
+
+                # 2. Extract tables in THIS column
+                # Use a tighter strategy to avoid capturing partial tables from other columns
+                tables = col_page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
                 })
-                continue
-            
-            # ── Group words into lines (same Y position) ──
-            lines = _group_words_into_lines(words, page.height)
-            
-            # ── Merge lines into paragraphs ──
-            paragraphs = _merge_lines_into_paragraphs(lines, page.width, page.height)
-            
-            # ── Detect headings ──
-            if paragraphs:
-                avg_font_size = np.mean([p['avg_size'] for p in paragraphs if p.get('avg_size')])
-            else:
-                avg_font_size = 11
-            
-            for para in paragraphs:
-                text = para['text'].strip()
-                if not text:
-                    continue
-                
-                # Heading detection
-                elem_type = "paragraph"
-                font_size = para.get('avg_size', avg_font_size)
-                
-                if font_size > avg_font_size * 1.2 and len(text) < 100:
-                    elem_type = "heading"
-                elif text.isupper() and len(text) < 80:
-                    elem_type = "heading"
-                elif para.get('is_bold') and len(text) < 80:
-                    elem_type = "heading"
-                
-                elements.append({
-                    "type": elem_type,
-                    "text": text,
-                    "confidence": 1.0,
-                    "bbox": para['bbox'],
+                table_finder = col_page.find_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
                 })
+                
+                if tables:
+                    for t_idx, table_data in enumerate(tables):
+                        if not table_data or not any(any(c for c in r if c) for r in table_data): continue
+                        
+                        clean_table = [[(c or "").strip() for c in r] for r in table_data]
+                        table_md = _table_to_markdown(clean_table)
+                        
+                        if t_idx < len(table_finder):
+                            tb = table_finder[t_idx].bbox
+                            # Important: convert back to full-page coordinates
+                            # col_page is already cropped, so x-coords are local.
+                            # But pdfplumber crop() maintains coordinates relative to original page usually, 
+                            # however let's be safe.
+                            bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
+                        else:
+                            bbox = [int(cx1), 0, int(cx2), 100]
+                        
+                        # Filter overlap
+                        col_elements = [e for e in col_elements if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)]
+                        col_elements.append({
+                            "type": "table",
+                            "text": table_md or "[TABLE]",
+                            "confidence": 1.0,
+                            "bbox": bbox,
+                            "table_data": clean_table,
+                        })
+
+                # 3. Extract images in THIS column
+                if hasattr(page, 'images') and page.images:
+                    for img in page.images:
+                        # Only check x center
+                        ix0, ix1 = img.get('x0', 0), img.get('x1', 0)
+                        ic = (ix0 + ix1) / 2
+                        if cx1 < ic < cx2:
+                            iw, ih = ix1 - ix0, img.get('bottom', 0) - img.get('top', 0)
+                            if iw > 50 and ih > 50:
+                                col_elements.append({
+                                    "type": "figure", "text": "[FIGURE]",
+                                    "confidence": 1.0,
+                                    "bbox": [int(ix0), int(img.get('top',0)), int(ix1), int(img.get('bottom',0))]
+                                })
+
+                if col_elements:
+                    col_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
+                    # Add to results as a separate "page" if multi-column
+                    pages_result.append({
+                        "page_num": page_idx,
+                        "column_num": col_idx + 1,
+                        "total_columns": len(col_boundaries) - 1,
+                        "elements": col_elements,
+                        "column_bbox": [int(cx1), 0, int(cx2), int(page.height)]
+                    })
             
             # ── Extract tables ──
             tables = page.extract_tables({

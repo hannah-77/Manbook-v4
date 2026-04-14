@@ -54,21 +54,7 @@ class BioArchitect:
 
     def __init__(self):
         self.base_path = _get_base_path()
-        self.letterhead_path = self._resolve_letterhead()
 
-    def _resolve_letterhead(self):
-        """Cari file letterhead relatif terhadap folder backend."""
-        raw = os.getenv("LETTERHEAD_PATH", "").strip()
-        if not raw:
-            return None
-        # Coba absolut dulu, lalu relatif ke BASE_PATH
-        if os.path.isabs(raw) and os.path.exists(raw):
-            return raw
-        candidate = os.path.join(self.base_path, raw)
-        if os.path.exists(candidate):
-            return candidate
-        logger.warning(f"Letterhead tidak ditemukan: {raw}")
-        return None
 
     def _resolve_crop_path(self, item):
         """
@@ -241,36 +227,11 @@ class BioArchitect:
         fldChar2.set(qn('w:fldCharType'), 'end')
         run_pg._r.extend([fldChar1, instrText, fldChar2])
 
-        # Letterhead image (hanya bagian gelombang + logo) di bawah nomor halaman
-        if self.letterhead_path:
-            try:
-                from PIL import Image as PILImage
-                import io
-
-                # Crop hanya 10% bawah agar tidak terlalu tinggi (mencegah footer naik ke tengah halaman)
-                img = PILImage.open(self.letterhead_path)
-                img_w, img_h = img.size
-                crop_top = int(img_h * 0.92)  # Ambil 8% terbawah saja
-                cropped = img.crop((0, crop_top, img_w, img_h))
-
-                img_buffer = io.BytesIO()
-                cropped.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-
-                fp_img = footer.add_paragraph()
-                fp_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                fp_img.paragraph_format.space_before = Pt(2)
-                fp_img.paragraph_format.space_after = Pt(0)
-                run_logo = fp_img.add_run()
-                run_logo.add_picture(img_buffer, width=Inches(6.5))
-            except Exception as e:
-                logger.warning(f"Gagal load letterhead di footer: {e}")
-                fp.add_run("\n© Elitech Technovision").font.size = Pt(8)
-        else:
-            run_co = fp.add_run("\n© Elitech Technovision")
-            run_co.font.name  = 'Arial'
-            run_co.font.size  = Pt(8)
-            run_co.font.color.rgb = self.COLOR_GRAY
+        # Standard text footer
+        run_co = fp.add_run("\n© Elitech Technovision")
+        run_co.font.name  = 'Arial'
+        run_co.font.size  = Pt(8)
+        run_co.font.color.rgb = self.COLOR_GRAY
 
     # ─────────────────────────────────────────────
     # Cover Page
@@ -339,44 +300,14 @@ class BioArchitect:
         rbm.font.bold  = True
         rbm.font.color.rgb = self.COLOR_BLACK
 
-        # ── Bawah: Letterhead (hanya bagian gelombang + logo) ──────
-        if self.letterhead_path:
-            try:
-                from PIL import Image as PILImage
-                import io
-
-                # Buka gambar letterhead dan crop hanya bagian bawah (gelombang + logo)
-                img = PILImage.open(self.letterhead_path)
-                img_w, img_h = img.size
-                
-                # Ambil 30% bawah gambar (area gelombang biru + logo Elitech)
-                crop_top = int(img_h * 0.70)
-                cropped = img.crop((0, crop_top, img_w, img_h))
-                
-                # Simpan ke buffer memory (tidak perlu file sementara)
-                img_buffer = io.BytesIO()
-                cropped.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-
-                p_logo = doc.add_paragraph()
-                p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_logo.paragraph_format.space_before = Pt(20)
-                p_logo.paragraph_format.space_after  = Pt(0)
-                p_logo.paragraph_format.first_line_indent = Pt(0)
-
-                # Negatif marjin kiri/kanan agar full-width
-                p_logo.paragraph_format.left_indent  = Cm(-3.0)
-                p_logo.paragraph_format.right_indent = Cm(-2.0)
-
-                p_logo.add_run().add_picture(
-                    img_buffer,
-                    width=Cm(21)   # lebar penuh A4
-                )
-            except Exception as e:
-                logger.warning(f"Cover letterhead error: {e}")
-                p_fb = doc.add_paragraph("[ Letterhead gagal dimuat ]")
-                p_fb.paragraph_format.first_line_indent = Pt(0)
-
+        # No letterhead branding on cover
+        p_co = doc.add_paragraph()
+        p_co.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run_co = p_co.add_run("© Elitech Technovision")
+        run_co.font.name  = 'Arial'
+        run_co.font.size  = Pt(10)
+        run_co.font.color.rgb = self.COLOR_GRAY
+        
         doc.add_page_break()
 
     # ─────────────────────────────────────────────
