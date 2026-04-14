@@ -1006,8 +1006,16 @@ Output ONLY the JSON array, nothing else."""
 
                     # ── Merge adjacent text lines into paragraphs ──
                     # PaddleOCR returns line-by-line; merge vertically close lines
+                    # using line-height-relative threshold (adaptive to font size/DPI)
                     if raw_lines:
                         raw_lines.sort(key=lambda e: e['bbox'][1])  # sort top-to-bottom
+
+                        # Calculate average line height for adaptive merge threshold
+                        line_heights = [e['bbox'][3] - e['bbox'][1] for e in raw_lines]
+                        avg_lh = sum(line_heights) / max(len(line_heights), 1)
+                        # Merge threshold: 1.8x avg line height (covers normal line spacing)
+                        merge_gap = max(25, int(avg_lh * 1.8))
+
                         merged = [dict(raw_lines[0])]
 
                         for line in raw_lines[1:]:
@@ -1019,8 +1027,8 @@ Output ONLY the JSON array, nothing else."""
                             x_overlap = min(pb[2], lb[2]) - max(pb[0], lb[0])
                             min_width = min(pb[2] - pb[0], lb[2] - lb[0]) or 1
 
-                            # Merge if vertically close (<25px) AND horizontally overlapping (>20%)
-                            if 0 <= vertical_gap < 25 and x_overlap / min_width > 0.20:
+                            # Merge if vertically close AND horizontally overlapping (>20%)
+                            if 0 <= vertical_gap < merge_gap and x_overlap / min_width > 0.20:
                                 prev['text'] = prev['text'] + ' ' + line['text']
                                 prev['bbox'] = [
                                     min(pb[0], lb[0]),

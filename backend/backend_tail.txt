@@ -1,0 +1,100 @@
+2026-03-26 12:42:20,566 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 13:17:05,234 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 13:24:09,121 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 13:54:13,715 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 13:55:54,361 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:07:47,938 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:10:19,579 - [BioManual] - Workflow Failed: 'charmap' codec can't encode character '\U0001f4dd' in position 2: character maps to <undefined>
+2026-03-26 14:24:06,857 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:25:41,764 - [BioManual] - Workflow Failed: 'charmap' codec can't encode characters in position 9-48: character maps to <undefined>
+2026-03-26 14:29:26,649 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:42:19,772 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:48:16,886 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:49:59,391 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 14:59:50,499 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 15:05:47,496 - [BioManual] - Workflow Failed: argument of type 'NoneType' is not iterable
+2026-03-26 16:01:56,159 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-26 16:01:56,159 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-26 16:01:56,159 - [BioManual] -       crop_local: None
+2026-03-26 16:01:56,159 - [BioManual] -       crop_url: None
+2026-03-26 16:01:56,162 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-26 16:01:56,163 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-26 16:01:56,163 - [BioManual] -       crop_local: None
+2026-03-26 16:01:56,163 - [BioManual] -       crop_url: None
+2026-03-26 16:22:21,563 - [BioManual] - quick_extract_text error: file 'C:\Users\Hanna\Manbook-v4\backend\_langdetect_temp_34. rev04 - MBEng_FOX-2.doc' is not a Word file, content type is 'application/vnd.openxmlformats-officedocument.themeManager+xml'
+2026-03-26 16:22:21,578 - [BioManual] - AI lang-detect: DOCX→PDF conversion failed: 
+2026-03-26 16:22:21,578 - [BioManual] - AI lang-detect: no image available
+2026-03-26 16:34:35,508 - [BioManual] - quick_extract_text error: file 'C:\Users\Hanna\Manbook-v4\backend\_langdetect_temp_34. rev04 - MBEng_FOX-2.doc' is not a Word file, content type is 'application/vnd.openxmlformats-officedocument.themeManager+xml'
+2026-03-26 16:34:35,523 - [BioManual] - AI lang-detect: DOCX→PDF conversion failed: 
+2026-03-26 16:34:35,524 - [BioManual] - AI lang-detect: no image available
+2026-03-26 16:36:51,735 - [BioManual] - quick_extract_text error: file 'C:\Users\Hanna\Manbook-v4\backend\_langdetect_temp_34. rev04 - MBEng_FOX-2.doc' is not a Word file, content type is 'application/vnd.openxmlformats-officedocument.themeManager+xml'
+2026-03-26 16:36:51,750 - [BioManual] - AI lang-detect: DOCX→PDF conversion failed: 
+2026-03-26 16:36:51,750 - [BioManual] - AI lang-detect: no image available
+2026-03-27 08:20:36,587 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 08:20:36,590 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 08:20:36,590 - [BioManual] -       crop_local: None
+2026-03-27 08:20:36,592 - [BioManual] -       crop_url: None
+2026-03-27 08:20:36,594 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 08:20:36,594 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 08:20:36,594 - [BioManual] -       crop_local: None
+2026-03-27 08:20:36,594 - [BioManual] -       crop_url: None
+2026-03-27 10:32:30,821 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 10:32:30,824 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 10:32:30,824 - [BioManual] -       crop_local: None
+2026-03-27 10:32:30,825 - [BioManual] -       crop_url: None
+2026-03-27 10:32:30,829 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 10:32:30,829 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 10:32:30,829 - [BioManual] -       crop_local: None
+2026-03-27 10:32:30,830 - [BioManual] -       crop_url: None
+2026-03-27 12:55:01,435 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 12:55:01,436 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 12:55:01,437 - [BioManual] -       crop_local: None
+2026-03-27 12:55:01,438 - [BioManual] -       crop_url: None
+2026-03-27 12:55:01,446 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 12:55:01,448 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 12:55:01,448 - [BioManual] -       crop_local: None
+2026-03-27 12:55:01,448 - [BioManual] -       crop_url: None
+2026-03-27 13:56:27,660 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 13:56:27,661 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 13:56:27,662 - [BioManual] -       crop_local: None
+2026-03-27 13:56:27,663 - [BioManual] -       crop_url: None
+2026-03-27 13:56:27,665 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 13:56:27,666 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 13:56:27,667 - [BioManual] -       crop_local: None
+2026-03-27 13:56:27,667 - [BioManual] -       crop_url: None
+2026-03-27 14:16:24,541 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 14:16:24,542 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 14:16:24,543 - [BioManual] -       crop_local: None
+2026-03-27 14:16:24,544 - [BioManual] -       crop_url: None
+2026-03-27 14:16:24,547 - [BioManual] -    ❌ Could not resolve any crop path for table
+2026-03-27 14:16:24,548 - [BioManual] -       item keys: ['chapter_id', 'chapter_title', 'type', 'original', 'normalized', 'typos', 'has_typo', 'text_confidence', 'match_score', 'lang', 'crop_url', 'crop_local', 'source_image_local', 'bbox', 'highlights', '_direct_read']
+2026-03-27 14:16:24,548 - [BioManual] -       crop_local: None
+2026-03-27 14:16:24,548 - [BioManual] -       crop_url: None
+2026-03-27 15:08:53,081 - [BioManual] - ⚠️ DOCX Direct Read failed: name 'base_name' is not defined — falling back to OCR
+2026-03-27 15:49:20,784 - [BioManual] - ⚠️ DOCX Direct Read failed: name 'base_name' is not defined — falling back to OCR
+2026-03-27 16:10:39,333 - [BioManual] - ⚠️ DOCX Direct Read failed: name 'base_name' is not defined — falling back to OCR
+2026-03-27 16:12:24,011 - [BioManual] - ⚠️ DOCX Direct Read failed: name 'base_name' is not defined — falling back to OCR
+2026-03-27 16:28:46,738 - [BioManual] - ⚠️ DOCX Direct Read failed: name 'base_name' is not defined — falling back to OCR
+2026-03-30 14:49:10,770 - [BioManual] - AI lang-detect: no image available
+2026-03-30 14:51:10,709 - [BioManual] - AI lang-detect: PDF conversion failed: Unable to get page count.
+Syntax Warning: May not be a PDF file (continuing anyway)
+
+Syntax Error: Couldn't find trailer dictionary
+
+Syntax Error: Couldn't find trailer dictionary
+
+Syntax Error: Couldn't read xref table
+
+
+2026-03-30 14:51:10,711 - [BioManual] - AI lang-detect: no image available
+2026-03-30 14:51:30,329 - [BioManual] - AI lang-detect: PDF conversion failed: Unable to get page count.
+Syntax Warning: May not be a PDF file (continuing anyway)
+
+Syntax Error: Couldn't find trailer dictionary
+
+Syntax Error: Couldn't find trailer dictionary
+
+Syntax Error: Couldn't read xref table
+
+
+2026-03-30 14:51:30,330 - [BioManual] - AI lang-detect: no image available

@@ -148,20 +148,18 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                 continue
             
             text = para.text.strip()
-            if not text:
-                # Check for images in inline shapes
-                inline_shapes = para._element.findall(
-                    './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
-                )
-                if inline_shapes:
-                    elements.append({
-                        "type": "figure",
-                        "text": "[FIGURE]",
-                        "confidence": 1.0,
-                        "bbox": [0, y_position, 800, y_position + 200],
-                    })
-                    y_position += 200
-                continue
+            import re
+            
+            # Find inline shapes and extract their embedded relationship ID (rId)
+            # This completely ignores <wp:anchor> which are floating decorations like header waves
+            xml_str = para._element.xml
+            inline_xmls = re.findall(r'<wp:inline.*?</wp:inline>', xml_str, re.DOTALL)
+            
+            rIds = []
+            for ix in inline_xmls:
+                match = re.search(r'r:embed="([^"]+)"', ix)
+                if match:
+                    rIds.append(match.group(1))
             
             # Determine type: heading vs paragraph
             style_name = (para.style.name or "").lower()
@@ -190,30 +188,29 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                         if max_size and max_size >= 177800:
                             elem_type = "heading"
             
-            # Check if paragraph contains inline images/drawings along with text
-            inline_shapes = para._element.findall(
-                './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
-            )
+            # Prior to recording text, record any leading figures (optional: order isn't perfect, but appending them is fine)
             
             # Estimate bbox based on text length
             text_height = max(LINE_HEIGHT, (len(text) // 80 + 1) * LINE_HEIGHT)
             bbox = [50, y_position, 750, y_position + text_height]
             
-            elements.append({
-                "type": elem_type,
-                "text": text,
-                "confidence": 1.0,
-                "bbox": bbox,
-            })
-            y_position += text_height + 5
+            if text:
+                elements.append({
+                    "type": elem_type,
+                    "text": text,
+                    "confidence": 1.0,
+                    "bbox": bbox,
+                })
+                y_position += text_height + 5
             
-            # If there were also images in this paragraph, add them
-            if inline_shapes:
+            # Add the mapped inline image elements found in this paragraph
+            for rId in rIds:
                 elements.append({
                     "type": "figure",
                     "text": "[FIGURE]",
                     "confidence": 1.0,
                     "bbox": [50, y_position, 750, y_position + 200],
+                    "rId": rId  # Explicit mapping for exact image extraction
                 })
                 y_position += 200
         
@@ -246,6 +243,47 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
             # Create markdown representation of table
             table_md = _table_to_markdown(table_data)
             
+            # Generate fake crop image for the UI preview
+            crop_fname = f"{base_name}_table_{len(elements)}_preview_only.png"
+            crop_path = os.path.join(output_dir, crop_fname)
+            
+            try:
+                from PIL import Image, ImageDraw, ImageFont
+                col_widths = []
+                for c in range(len(table_data[0])):
+                    max_w = max([len(str(row[c])) for row in table_data if c < len(row)] + [5])
+                    col_widths.append(min(max_w * 7 + 20, 300))  # cap column width
+                    
+                row_height = 25
+                img_w = min(sum(col_widths) + 20, 1500)
+                img_h = min(len(table_data) * row_height + 20, 2000)
+                
+                img = Image.new('RGB', (img_w, img_h), color=(250, 250, 250))
+                d = ImageDraw.Draw(img)
+                y_c = 10
+                for r_idx, row in enumerate(table_data):
+                    x_c = 10
+                    for c_idx, cell in enumerate(row):
+                        if c_idx >= len(col_widths): break
+                        w = col_widths[c_idx]
+                        d.rectangle([x_c, y_c, x_c+w, y_c+row_height], outline=(200, 200, 200))
+                        txt = str(cell).replace('\n', ' ')
+                        max_chars = (w - 10) // 6
+                        if len(txt) > max_chars: txt = txt[:max_chars-3] + "..."
+                        color = (50,50,50) if r_idx > 0 else (0,0,120)
+                        d.text((x_c+5, y_c+5), txt, fill=color)
+                        x_c += w
+                    y_c += row_height
+                    if y_c > img_h - row_height: break
+                    
+                img.save(crop_path)
+                from urllib.parse import quote
+                crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+            except Exception as e:
+                logger.warning(f"PIL table generation failed: {e}")
+                crop_path = None
+                crop_url = None
+            
             table_height = max(100, len(table_data) * LINE_HEIGHT)
             elements.append({
                 "type": "table",
@@ -253,6 +291,8 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                 "confidence": 1.0,
                 "bbox": [50, y_position, 750, y_position + table_height],
                 "table_data": table_data,
+                "crop_local": crop_path,
+                "crop_url": crop_url
             })
             y_position += table_height + 10
     
@@ -321,11 +361,13 @@ def _table_to_markdown(table_data: list[list[str]]) -> str:
 def _extract_docx_images(doc, docx_path: str, elements: list):
     """
     Extract embedded images from DOCX and save them to output_results/.
+    Only extracts images related to the main document body (`document.xml`),
+    automatically filtering out headers, footers, and page backgrounds.
     Updates figure elements with crop_url and crop_local paths.
     """
     try:
-        import zipfile
         from PIL import Image
+        import io
         
         backend_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(backend_dir, "output_results")
@@ -333,32 +375,26 @@ def _extract_docx_images(doc, docx_path: str, elements: list):
         
         base_name = os.path.splitext(os.path.basename(docx_path))[0]
         
-        # DOCX is a ZIP file — extract images from word/media/
-        with zipfile.ZipFile(docx_path, 'r') as z:
-            media_files = [f for f in z.namelist() if f.startswith('word/media/')]
-            
-            if not media_files:
-                return
-            
-            img_idx = 0
-            figure_elements = [e for e in elements if e['type'] == 'figure']
-            
-            for media_path in sorted(media_files):
-                ext = os.path.splitext(media_path)[1].lower()
-                if ext not in ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.emf', '.wmf'):
+        img_idx = 0
+        figure_elements = [e for e in elements if e['type'] == 'figure']
+        
+        # Iterate over only elements related to the main document body!
+        # This completely skips header1.xml, footer1.xml and background images
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
+                image_part = rel.target_part
+                ext = image_part.content_type.split('/')[-1].lower()
+                
+                # Skip invalid extensions
+                if ext not in ('png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff'):
                     continue
                 
                 try:
-                    img_data = z.read(media_path)
+                    img_data = image_part.blob
                     
                     # Save to output_results
-                    crop_fname = f"{base_name}_direct_img_{img_idx}.png"
+                    crop_fname = f"{base_name}_direct_img_{img_idx}.{ext}"
                     crop_path = os.path.join(output_dir, crop_fname)
-                    
-                    # Convert to PNG if needed
-                    if ext in ('.emf', '.wmf'):
-                        # Skip vector formats — can't easily convert
-                        continue
                     
                     with open(crop_path, 'wb') as f:
                         f.write(img_data)
@@ -372,11 +408,10 @@ def _extract_docx_images(doc, docx_path: str, elements: list):
                         figure_elements[img_idx]['crop_local'] = crop_path
                     
                     img_idx += 1
-                
                 except Exception as e:
-                    logger.warning(f"Failed to extract image {media_path}: {e}")
-        
-        logger.info(f"📸 Extracted {img_idx} images from DOCX")
+                    logger.warning(f"Failed to extract body image {image_part.partname}: {e}")
+                    
+        logger.info(f"📸 Extracted {img_idx} body images from DOCX (Headers/Footers skipped)")
     
     except Exception as e:
         logger.warning(f"DOCX image extraction error: {e}")

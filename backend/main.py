@@ -9,6 +9,7 @@ Modules:
   - vision_engine.py   → BioVisionHybrid (OCR + layout detection + AI classification)
   - openrouter_client.py → OpenRouter API client
 
+// haii
 Updated: February 2026
 """
 
@@ -25,6 +26,7 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Request, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -97,15 +99,52 @@ if not os.path.exists(OUTPUT_DIR):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [BioManual] - %(message)s')
 logger = logging.getLogger("BioManual")
+
+# Ensure logs go to Console (Stdout) even if run as detached
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(logging.Formatter('%(asctime)s - [BioManual] - %(message)s'))
+logger.addHandler(stream_handler)
+
+# Ensure logs go to File
 file_handler = logging.FileHandler('backend.log', encoding='utf-8')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - [BioManual] - %(message)s'))
 logger.addHandler(file_handler)
+
+# ==========================================
+# SPLASH BANNER
+# ==========================================
+print("\n" + "="*50)
+print("  >>> BIOMANUAL BACKEND IS STARTING... <<<")
+print("  >>> PORT: 8000 | HOST: 127.0.0.1      <<<")
+print("="*50 + "\n")
+
+# Global OCR for quick language detection (lazy-loaded)
+# (DISABLED temporarily for quick-detect to prevent startup hangs)
+_QUICK_OCR = None
+def get_quick_ocr():
+    return None
 
 # Configuration: Choose vision engine mode
 VISION_MODE = os.getenv('VISION_MODE', 'hybrid')
 
 app = FastAPI(title="BioManual Auto-Standardizer")
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+
+@app.get("/")
+@app.get("/health")
+@app.get("/ping")
+async def health_check():
+    return {"status": "ok", "message": "BioManual Backend is RUNNING", "timestamp": time.time()}
 
 # Serve static files from backend directory (e.g., letterhead.png)
 @app.api_route("/files/{filename}", methods=["GET", "HEAD"])
@@ -154,7 +193,88 @@ def _print_progress(current: int, total: int, label: str = "", width: int = 40):
 # ==========================================
 # Helper Functions
 # ==========================================
-def convert_pdf_to_images_safe(path):
+def _merge_chopped_paragraphs(elements: list) -> list:
+    """
+    Merges consecutive paragraph elements that logically belong to the same sentence.
+    This fixes the issue where OCR/layout engines chop a single sentence across
+    multiple bounding boxes or lines.
+    """
+    if not elements:
+        return []
+        
+    merged = []
+    for el in elements:
+        if not merged:
+            merged.append(el)
+            continue
+            
+        prev = merged[-1]
+        
+        # Only attempt to merge if both are paragraphs and belong to the same chapter
+        if (prev.get('type') == 'paragraph' and el.get('type') == 'paragraph' and
+            prev.get('chapter_id') == el.get('chapter_id')):
+            
+            prev_text = (prev.get('normalized') or '').strip()
+            curr_text = (el.get('normalized') or '').strip()
+            
+            if not prev_text or not curr_text:
+                merged.append(el)
+                continue
+                
+            # Safe merging conditions to avoid destroying paragraph structure:
+            # 1. Provide a STRONG continuation signal like ending in comma, hyphen, or conjunction.
+            # 2. Provide a STRONG continuation signal where the next line starts with a lowercase letter.
+            # 3. Missing terminal punctuation (doesn't end with . ! ? : ;) implies the sentence hasn't finished.
+            ends_with_continuation = prev_text.endswith((',', '-', '—')) or prev_text.lower().endswith((' dan', ' atau', ' and', ' or', ' yang', ' dengan', ' ke', ' dari', ' di', ' pada'))
+            ends_with_terminal = prev_text.endswith(('.', '!', '?', ':', ';'))
+            starts_with_lowercase = curr_text.strip()[0].islower()
+            is_list_item = bool(re.match(r'^([\-\•\*]|\d+\.|[a-zA-Z]\.)\s', curr_text.strip()))
+            
+            # Logic: ONLY merge if it's evidently a broken sentence.
+            if (not ends_with_terminal or starts_with_lowercase or ends_with_continuation) and not is_list_item:
+                # Merge! Replace newlines with spaces to ensure it is one continuous sentence
+                new_text = prev_text + ' ' + curr_text
+                new_orig = (prev.get('original') or '').strip() + ' ' + (el.get('original') or '').strip()
+                
+                new_text = new_text.replace('\n', ' ')
+                new_orig = new_orig.replace('\n', ' ')
+                
+                # Cleanup multiple spaces
+                prev['normalized'] = re.sub(r'[ \t]+', ' ', new_text)
+                prev['original'] = re.sub(r'[ \t]+', ' ', new_orig)
+                
+                # Expand bounding box
+                pb = prev.get('bbox')
+                cb = el.get('bbox')
+                if pb and cb and len(pb) == 4 and len(cb) == 4:
+                    prev['bbox'] = [
+                        min(pb[0], cb[0]),
+                        min(pb[1], cb[1]),
+                        max(pb[2], cb[2]),
+                        max(pb[3], cb[3]),
+                    ]
+                
+                # Average confidence
+                pc = prev.get('text_confidence', 1.0)
+                cc = el.get('text_confidence', 1.0)
+                if isinstance(pc, (int, float)) and isinstance(cc, (int, float)):
+                    prev['text_confidence'] = round((pc + cc) / 2, 2)
+                
+                # Merge highlights
+                ph = prev.get('highlights', [])
+                ch = el.get('highlights', [])
+                prev['highlights'] = ph + ch
+            else:
+                merged.append(el)
+        else:
+            merged.append(el)
+            
+    return merged
+def convert_pdf_to_images_safe(path, last_page=None):
+    """
+    Convert PDF pages to PIL images.
+    Set last_page=1 for quick detection to avoid memory issues with large PDFs.
+    """
     from pdf2image import convert_from_path
     poppler = os.environ.get('POPPLER_PATH')
     if not poppler:
@@ -164,8 +284,14 @@ def convert_pdf_to_images_safe(path):
                  break
     dpi = int(os.getenv('PDF_DPI', '300'))
     try:
-        return convert_from_path(path, dpi=dpi, poppler_path=poppler)
+        kwargs = {"dpi": dpi, "poppler_path": poppler}
+        if last_page:
+            kwargs["last_page"] = last_page
+        return convert_from_path(path, **kwargs)
     except Exception:
+        # Fallback without poppler_path if it fails
+        if last_page:
+            return convert_from_path(path, dpi=dpi, last_page=last_page)
         return convert_from_path(path, dpi=dpi)
 
 
@@ -643,115 +769,76 @@ def _quick_extract_text(file_path: str, fname_lower: str) -> str:
     Extract a sample of text from a file (not full OCR — just enough
     for langdetect to work, typically 300-500 characters).
     """
-    text = ""
+    logger.info(f"   [Step 1a] Quick extracting text from: {fname_lower}")
+    text_parts = []
 
     try:
-        # DOCX — fastest: python-docx reads embedded text directly
-        if fname_lower.endswith(('.docx', '.doc')):
-            from docx import Document
-            doc = Document(file_path)
-            paragraphs = []
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    paragraphs.append(para.text.strip())
-                if sum(len(p) for p in paragraphs) > 1000:
-                    break
-            
-            # If still not enough text, check tables
-            if sum(len(p) for p in paragraphs) < 100:
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if cell.text.strip():
-                                paragraphs.append(cell.text.strip())
-                            if sum(len(p) for p in paragraphs) > 1000:
-                                break
-                        if sum(len(p) for p in paragraphs) > 1000:
-                            break
-                    if sum(len(p) for p in paragraphs) > 1000:
-                        break
-                        
-            text = ' '.join(paragraphs)
-
-        # PDF — extract text using PyMuPDF (fitz) — much faster/better than PyPDF2
-        elif fname_lower.endswith('.pdf'):
+        # DOCX — use zipfile to read xml directly (fastest, no python-docx overhead)
+        if fname_lower.endswith('.docx'):
+            logger.info("   [Step 1b] File is DOCX. Searching XML for text content...")
             try:
-                import fitz
-                doc = fitz.open(file_path)
-                pages_text = []
-                # First 3 pages
-                for page in doc.pages(0, min(3, len(doc))):
-                    pages_text.append(page.get_text())
-                    if sum(len(p) for p in pages_text) > 1000:
-                        break
-                text = ' '.join(pages_text)
-                doc.close()
+                import zipfile
+                import xml.etree.ElementTree as ET
+                with zipfile.ZipFile(file_path, 'r') as z:
+                    xml_content = z.read('word/document.xml')
+                    tree = ET.fromstring(xml_content)
+                    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                    for para in tree.findall('.//w:t', ns):
+                        if para.text:
+                            text_parts.append(para.text)
+                        if sum(len(p) for p in text_parts) > 1200:
+                            break
+                logger.info(f"   [Step 1c] DOCX XML Extraction: SUCCESS ({sum(len(p) for p in text_parts)} characters found)")
             except Exception as e:
-                logger.warning(f"PyMuPDF quick extract failed: {e}")
-                # Fallback to PyPDF2 if fitz fails
+                logger.warning(f"   [Step 1b-error] Direct XML fail: {e}")
+                # Fallback to python-docx
                 try:
+                    logger.info("   [Step 1b-fallback] Trying python-docx library...")
+                    from docx import Document
+                    doc = Document(file_path)
+                    for p in doc.paragraphs[:20]:
+                        if p.text.strip():
+                            text_parts.append(p.text.strip())
+                except: pass
+
+        # PDF — extract embedded text
+        elif fname_lower.endswith('.pdf'):
+            logger.info("   [Step 1b] File is PDF. Attempting embedded text extraction...")
+            try:
+                # Try pdfplumber first (reliable)
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages[:3]:
+                        t = page.extract_text()
+                        if t: text_parts.append(t)
+                        if sum(len(p) for p in text_parts) > 1200: break
+                logger.info(f"   [Step 1c] PDF Text Extraction: SUCCESS ({sum(len(p) for p in text_parts)} characters found)")
+            except Exception as e:
+                logger.warning(f"   [Step 1b-error] pdfplumber fail: {e}")
+                # Fallback to PyPDF2
+                try:
+                    logger.info("   [Step 1b-fallback] Trying PyPDF2 library...")
                     import PyPDF2
                     with open(file_path, 'rb') as f:
                         reader = PyPDF2.PdfReader(f)
-                        pages_text = []
                         for page in reader.pages[:3]:
-                            pages_text.append(page.extract_text() or "")
-                            if sum(len(p) for p in pages_text) > 1000:
-                                break
-                        text = ' '.join(pages_text)
-                except:
-                    pass
+                            t = page.extract_text()
+                            if t: text_parts.append(t)
+                except: pass
 
-        # IMAGE or SCANNED PDF — quick OCR on first page
-        if not text.strip():
-            img = None
-            if fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                img = cv2.imread(file_path)
-            elif fname_lower.endswith('.pdf'):
-                # Convert first page of PDF to image for quick OCR
-                try:
-                    import fitz
-                    doc = fitz.open(file_path)
-                    if len(doc) > 0:
-                        pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Slight upscale for OCR
-                        img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                        img = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR) if pix.n == 3 else cv2.cvtColor(img_data, cv2.COLOR_GRAY2BGR)
-                    doc.close()
-                except Exception as e:
-                    logger.warning(f"fitz PDF-to-image quick ocr failed: {e}")
-
-            if img is not None:
-                h, w = img.shape[:2]
-                scale = min(1000 / w, 800 / h, 1.0)
-                if scale < 1.0:
-                    img = cv2.resize(img, (int(w * scale), int(h * scale)))
-                
-                # Use Tesseract if available (v.fast for single block)
-                try:
-                    import pytesseract
-                    # PSM 3 = fully automatic page segmentation
-                    text = pytesseract.image_to_string(img, lang='ind+eng', config='--psm 3 --oem 1')
-                except:
-                    # Fallback to PaddleOCR (use global instance if possible, or init once)
-                    try:
-                        from paddleocr import PaddleOCR
-                        # Look for global vision_module or ocr_engine
-                        global vision_module
-                        if vision_module and hasattr(vision_module, 'ocr_engine'):
-                            ocr = vision_module.ocr_engine
-                        else:
-                            ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
-                        
-                        result = ocr.ocr(img, cls=False)
-                        if result and result[0]:
-                            text = ' '.join(line[1][0] for line in result[0] if line[1][1] > 0.4)
-                    except:
-                        pass
+        # IMAGE or fallback OCR for scanned docs (Only if no text found)
+        if not text_parts and fname_lower.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.pdf')):
+            logger.info("   [Step 1d] No embedded text found — document is likely a scan/image.")
+            # At this stage we return empty so it falls back to the ROBUST AI Vision in the main loop
+            # rather than trying the disabled local OCR here.
+            logger.info("   [Step 1e] Skipping local OCR for quick detect to speed up processing.")
+            return ""
 
     except Exception as e:
-        logger.warning(f"quick_extract_text error: {e}")
+        logger.error(f"   [Step 1-CRASH] Overall quick extraction error: {e}")
 
-    return text.strip()
+    sample_text = ' '.join(text_parts).strip()
+    return sample_text
 
 
 def _detect_lang_from_text(text: str) -> dict:
@@ -863,7 +950,7 @@ def _detect_lang_with_ai(file_path: str, fname_lower: str) -> dict:
         if fname_lower.endswith('.pdf'):
             # PDF → convert first page to image
             try:
-                images = convert_pdf_to_images_safe(file_path)
+                images = convert_pdf_to_images_safe(file_path, last_page=1)
                 if images:
                     img_path = os.path.join(BASE_PATH, f"_langdetect_ai_page.png")
                     images[0].save(img_path, "PNG")
@@ -1011,59 +1098,91 @@ If you see both languages, pick the DOMINANT one."""
 async def detect_language(file: UploadFile = File(...)):
     """
     Quickly detect the language of an uploaded document without full OCR.
-    Used by the frontend immediately after file selection to suggest a language.
-
-    Returns:
-      - detected: 'id' | 'en' | null
-      - confidence: 0.0 - 1.0
-      - label: human-readable language name
-      - message: UI notification text
+    Used by the frontend immediately after file selection to auto-set language.
     """
+    import shutil
+    from fastapi.concurrency import run_in_threadpool
+
+    # Sanitize filename: only allow Alphanumeric + . _ -
+    safe_name = "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+    temp_path = os.path.join(BASE_PATH, f"_lang_tmp_{uuid.uuid4().hex[:8]}_{safe_name}")
     fname_lower = file.filename.lower()
-    temp_path   = os.path.join(BASE_PATH, f"_langdetect_temp_{file.filename}")
+
+    logger.info(f"🔍 [LanguageDetect] NEW REQUEST: {file.filename}")
 
     try:
-        # Save uploaded file temporarily
-        with open(temp_path, "wb") as buf:
-            shutil.copyfileobj(file.file, buf)
+        # 0. Seek to 0 (crucial for FastAPI UploadFile)
+        await file.seek(0)
+        
+        # 1. Save uploaded file temporarily (sync work -> threadpool)
+        def _save_tmp():
+            with open(temp_path, "wb") as buf:
+                shutil.copyfileobj(file.file, buf)
+        
+        await run_in_threadpool(_save_tmp)
+        logger.info(f"   [LanguageDetect] Temp file saved: {temp_path}")
 
-        # Extract sample text
-        sample_text = _quick_extract_text(temp_path, fname_lower)
-        logger.info(f"📝 LangDetect: extracted {len(sample_text)} chars from {file.filename}")
+        # 2. Extract sample text (Heavy sync work -> threadpool)
+        sample_text = await run_in_threadpool(_quick_extract_text, temp_path, fname_lower)
+        logger.info(f"   [Step 2] Extracted {len(sample_text or '')} characters for analysis")
 
-        # Detect language (text-based)
+        # 3. Detect language text-based (Fast sync)
+        logger.info("   [Step 3] Running keyword-based language analysis...")
         result = _detect_lang_from_text(sample_text)
-
-        # ── AI Vision Fallback: jika teks terlalu sedikit ──
-        if result.get("detected") is None:
-            logger.info("🧠 Text too short — trying AI Vision fallback...")
-            ai_result = _detect_lang_with_ai(temp_path, fname_lower)
+        logger.info(f"   [Step 3b] Text analysis result: {result.get('detected')} (conf: {result.get('confidence')})")
+        
+        # ── AI Vision Fallback: jika teks terlalu sedikit ATAU confidence rendah ──
+        if result.get("detected") is None or result.get("confidence", 0.0) < 0.60:
+            logger.info("   [Step 4] 🧠 LOW CONFIDENCE or NO TEXT — Triggering AI Vision fallback...")
+            # Heavy AI work -> threadpool
+            ai_result = await run_in_threadpool(_detect_lang_with_ai, temp_path, fname_lower)
+            
             if ai_result and ai_result.get("detected"):
                 ai_result["filename"] = file.filename
-                ai_result["sample_length"] = len(sample_text)
+                ai_result["sample_length"] = len(sample_text or "")
+                logger.info(f"   [Step 4b] ✅ AI VISION DETECTION SUCCESS: {ai_result.get('detected')}")
                 return ai_result
             else:
-                logger.info("⚠️ AI Vision fallback juga gagal")
+                logger.info("   [Step 4c] ⚠️ AI Vision failed — finalizing with default 'id'")
+                result = {
+                    "detected": "id",
+                    "confidence": 0.0,
+                    "confidence_label": "Default fallback",
+                    "label": "Bahasa Indonesia",
+                    "message": "🇮🇩 Bahasa default: Indonesia (deteksi tidak optimal).",
+                    "ai_detected": False,
+                    "fallback_default": True,
+                }
 
         result["filename"] = file.filename
-        result["sample_length"] = len(sample_text)
-
+        result["sample_length"] = len(sample_text or "")
+        logger.info(f"   [LanguageDetect] ✅ FINISHED: {result.get('detected')}")
         return result
 
     except Exception as e:
-        logger.error(f"detect-language error: {e}")
+        logger.error(f"   [LanguageDetect] ❌ CRASHED: {e}\n{traceback.format_exc()}")
         return {
-            "detected"   : None,
-            "confidence" : 0.0,
-            "label"      : "Error",
-            "message"    : f"Tidak dapat mendeteksi bahasa: {str(e)}"
+            "detected"        : "id",
+            "confidence"      : 0.0,
+            "confidence_label": "Error fallback",
+            "label"           : "Bahasa Indonesia",
+            "message"         : "🇮🇩 Bahasa default: Indonesia (Terjadi kesalahan server).",
+            "fallback_default": True,
+            "error": str(e)
         }
     finally:
         try:
             if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except Exception as e:
-            logger.warning(f"Could not remove lang-detect temp file: {e}")
+                # Using direct os.remove instead of await to avoid potential event loop stalls
+                # but wrapped in a separate thread just in case it's on a slow drive.
+                import threading
+                def _cleanup():
+                    try:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except: pass
+                threading.Thread(target=_cleanup, daemon=True).start()
+        except: pass
 
 
 @app.post("/process")
@@ -1756,6 +1875,10 @@ Respond ONLY with a valid pure JSON object in this exact format, with NO markdow
         if missing:
             logger.info(f"⚠️ Missing chapters: {sorted(missing)}")
 
+        # ── MERGE FRAGMENTED TEXTS ──
+        # Fixes issue where single sentences get chopped into multiple disjointed lines
+        structured_data = _merge_chopped_paragraphs(structured_data)
+
         # STEP 3: THE ARCHITECT (Build)
         progress_tracker[session_id].update({
             "status": "building",
@@ -2108,6 +2231,9 @@ async def supplement_workflow(
 
         # STEP 3: MERGE & RE-BUILD
         combined_data = original_data + supplementary_data
+        
+        # ── MERGE FRAGMENTED TEXTS ──
+        combined_data = _merge_chopped_paragraphs(combined_data)
         
         # Update session data
         active_sessions[session_id]["structured_data"] = combined_data

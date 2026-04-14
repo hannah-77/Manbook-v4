@@ -606,6 +606,12 @@ class BioArchitect:
                 content_type = item['type']
                 text         = item['normalized']
 
+                # ── Tabel dari DOCX tidak punya crop gambar, formatnya berwujud Markdown (Teks) ──
+                # Jika dia 'table' tapi murni teks Markdown tanpa gambar crop (atau pakai fake PIL crop), alihkan ke pemroses teks
+                resolved_crop = self._resolve_crop_path(item)
+                if content_type == 'table' and (not resolved_crop or '_preview_only' in resolved_crop):
+                    content_type = 'paragraph'
+
                 if content_type in ('title', 'heading'):
                     # Tentukan level heading berdasarkan teks atau level tersimpan
                     stored_lvl = item.get('heading_level', 0)
