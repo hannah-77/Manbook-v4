@@ -564,7 +564,7 @@ _ENTITY_MAP_ID = {
     "but"        : "berlaku",   # 'alarm garansi but' → 'berlaku'
     "garis"      : "gratis",    # 'cara garis' → 'cara gratis'
 }
-
+*hghg*
 _ENTITY_MAP_EN = {
     # ── Brand & nama perusahaan ──────────────────────────────────
     "STINKO"      : "SINKO",
