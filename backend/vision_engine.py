@@ -48,6 +48,11 @@ if not hasattr(np, 'sctypes'):
 # Surya Layout Detection (replaces PPStructure)
 try:
     import torch  # Pre-load torch DLLs safely
+
+    # Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("BioVisionHybrid Device:", device)
+
     from PIL import Image as PILImage
     from surya.foundation import FoundationPredictor
     from surya.layout import LayoutPredictor
@@ -56,6 +61,7 @@ try:
 except ImportError as _surya_err:
     SURYA_AVAILABLE = False
     logging.warning(f"⚠️ Surya not available: {_surya_err}. Layout detection will be limited.")
+
 
 from paddleocr import PaddleOCR
 from dotenv import load_dotenv
@@ -133,11 +139,23 @@ class BioVisionHybrid:
         """
         # ── Stage 1: Surya Layout Engine ──
         if SURYA_AVAILABLE:
-            logger.info("Initializing Surya Layout Predictor...")
+            logger.info(f"Initializing Surya Layout Predictor on {device}...")
             self._surya_foundation = FoundationPredictor(
                 checkpoint=surya_settings.LAYOUT_MODEL_CHECKPOINT
             )
+            
+            # Pindahkan model foundation ke GPU
+            if hasattr(self._surya_foundation, 'model'):
+                self._surya_foundation.model = self._surya_foundation.model.to(device)
+            elif hasattr(self._surya_foundation, 'processor'):
+                pass # processor doesn't use device
+                
             self.layout_engine = LayoutPredictor(self._surya_foundation)
+            
+            # Pindahkan model layout_engine ke GPU
+            if hasattr(self.layout_engine, 'model'):
+                self.layout_engine.model = self.layout_engine.model.to(device)
+                
             logger.info("✓ Surya Layout Predictor: Ready")
         else:
             logger.warning("⚠️ Surya not available — layout detection will be limited")
@@ -818,19 +836,29 @@ Output ONLY the JSON array, nothing else."""
         output_dir = os.path.join(backend_dir, "output_results")
         os.makedirs(output_dir, exist_ok=True)
 
-        # Load image
+        # Stage 1: Load and Optimize
         original_img = cv2.imread(image_path)
         if original_img is None:
             logger.error(f"Failed to load image: {image_path}")
             return {"elements": [], "clean_image_path": None}
+        
+        # --- WATERMARK REMOVAL & ENHANCEMENT ---
+        from image_processing import remove_watermarks_and_enhance
+        enhanced = remove_watermarks_and_enhance(original_img)
+        if enhanced is not None:
+            # Update image_path with enhanced version
+            enhanced_path = image_path.replace(".png", "_enhanced.png").replace(".jpg", "_enhanced.jpg")
+            cv2.imwrite(enhanced_path, enhanced)
+            image_path = enhanced_path
+            original_img = enhanced
+        # --------------------------------------
 
         h, w = original_img.shape[:2]
 
         # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
         # Dokumen yang di-scan dengan resolusi rendah sering menghasilkan
         # teks blur yang tidak bisa dibaca oleh OCR manapun.
-        # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
-        # Diturunkan ambang batasnya menjadi 1200, atau dimatikan sebagian jika fast_mode
+
         ocr_img = original_img   # Gambar yang dipakai untuk OCR (bisa berbeda dari preview)
         ocr_scale = 1.0
         upscale_threshold = 1000 if fast_mode else 1200
@@ -1046,13 +1074,27 @@ Output ONLY the JSON array, nothing else."""
 
                             # Heading heuristic: short text + tall font OR all caps
                             is_heading = (
-                                (line_h > avg_line_height * 1.3 and text_len < 80)
+                                (line_h > avg_line_height * 1.3 and text_len < 100)
                                 or (m['text'].isupper() and text_len < 60)
-                                or (text_len < 50 and line_h > 30)
+                                or (text_len < 50 and line_h > 28)
                             )
+                            
+                            # List-item heuristic: starts with bullet, dash, or number/letter followed by dot/parenthesis
+                            is_list = False
+                            list_patterns = [
+                                r'^[\u2022\u00b7\u25cf\u25cb\u25a0\-]\s+', # Bullet/dash
+                                r'^\d+[\.\)]\s+',                         # 1. or 1)
+                                r'^[a-z][\.\)]\s+(?![a-z])',              # a. or a)
+                                r'^[ivx]+[\.\)]\s+(?![a-z])'              # i. or i)
+                            ]
+                            if not is_heading:
+                                for pattern in list_patterns:
+                                    if re.match(pattern, m['text'], re.IGNORECASE):
+                                        is_list = True
+                                        break
 
                             elements.append({
-                                "type": "heading" if is_heading else "paragraph",
+                                "type": "heading" if is_heading else ("list" if is_list else "paragraph"),
                                 "text": m['text'],
                                 "bbox": m['bbox'],
                                 "confidence": m['confidence'],

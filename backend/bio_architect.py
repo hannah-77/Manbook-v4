@@ -7,8 +7,6 @@ Template profesional Manual Book standar industri.
 Updated: February 2026
 """
 
-// jjj
-
 import os
 import re
 import logging
@@ -759,6 +757,13 @@ class BioArchitect:
                         p.paragraph_format.first_line_indent = Pt(0)
                         p.runs[0].font.color.rgb = self.COLOR_GRAY
 
+                elif content_type == 'list':
+                    # Rendering list items using 'List Bullet' style
+                    p = doc.add_paragraph(text, style='List Bullet')
+                    p.paragraph_format.space_before = Pt(0)
+                    p.paragraph_format.space_after = Pt(4)
+                    p.paragraph_format.first_line_indent = Pt(0)
+                    
                 else:  # Body text
                     lines = text.strip().split('\n')
                     is_md_table = False

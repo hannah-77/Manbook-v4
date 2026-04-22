@@ -20,6 +20,22 @@ from pathlib import Path
 
 logger = logging.getLogger("BioManual.DirectReader")
 
+_WATERMARK_PATTERNS = [
+    r'(?i)draft', r'(?i)confidential', r'(?i)strictly confidential',
+    r'(?i)internal use', r'(?i)preview', r'(?i)watermark', 
+    r'(?i)sample', r'(?i)copy', r'(?i)not for distribution'
+]
+
+def _is_watermark(text: str) -> bool:
+    """Check if the text matches common watermark patterns."""
+    if not text: return False
+    clean = text.strip()
+    if len(clean) < 3 or len(clean) > 30: return False
+    for p in _WATERMARK_PATTERNS:
+        if re.search(p, clean):
+            return True
+    return False
+
 
 # ═══════════════════════════════════════════════════════════════
 # 1. PDF TYPE DETECTION — is it text-based or scanned?
@@ -148,6 +164,11 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                 continue
             
             text = para.text.strip()
+            
+            # Filter out watermarks
+            if _is_watermark(text):
+                continue
+                
             if not text:
                 # Check for images in inline shapes
                 inline_shapes = para._element.findall(
@@ -246,13 +267,16 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
             # Create markdown representation of table
             table_md = _table_to_markdown(table_data)
             
+            # Change: User wants tables to be "cut" (cropped) not turned into text.
+            # For Word, we can't easily crop yet, but we'll stop showing the text.
             table_height = max(100, len(table_data) * LINE_HEIGHT)
             elements.append({
                 "type": "table",
-                "text": table_md if table_md else "[TABLE]",
+                "text": "[TABLE]",
                 "confidence": 1.0,
                 "bbox": [50, y_position, 750, y_position + table_height],
                 "table_data": table_data,
+                "markdown_text": table_md  # Keep as metadata
             })
             y_position += table_height + 10
     
@@ -402,6 +426,8 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
     }
     """
     import pdfplumber
+    import cv2
+    import numpy as np
     
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(backend_dir, "output_results")
@@ -416,114 +442,144 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
         logger.info(f"📄 PDF Direct Reader: {total_pages} pages")
         
         for page_idx, page in enumerate(pdf.pages):
-            elements = []
-            
-            # ── Extract text with position info ──
-            raw_words = page.extract_words(
-                x_tolerance=3,
-                y_tolerance=3,
-                keep_blank_chars=False,
-                extra_attrs=['fontname', 'size']
-            )
-            
-            # ── Filter out headers and footers ──
-            # Standard PDF height is ~792 points (11 inches). Top/bottom 60pt is ~0.8 inches.
-            header_margin = min(60, page.height * 0.08)
-            footer_margin = max(page.height - 60, page.height * 0.92)
-            words = []
-            for w in raw_words:
-                y_center = (w['top'] + w['bottom']) / 2
-                if header_margin < y_center < footer_margin:
-                    words.append(w)
-            
-            if not words:
+            # ── Visual Column Detection (Render + CV) ──
+            # This allows us to handle 2, 3, or 4 column layouts without interleaving text.
+            col_boundaries = [0, page.width]
+            try:
+                # Render low-res for speed
+                render = page.to_image(resolution=72)
+                img_cv = cv2.cvtColor(np.array(render.original), cv2.COLOR_RGB2BGR)
+                h_cv, w_cv = img_cv.shape[:2]
+                
+                # Grayscale + Threshold
+                gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                _, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
+                
+                # Vertical projection (percentage of white pixels)
+                roi = binary[int(h_cv*0.1):int(h_cv*0.9), :] # Ignore headers/footers
+                white_ratio = np.mean(roi == 255, axis=0) # shape (w_cv,)
+                
+                # Smooth
+                kernel = np.ones(max(3, w_cv // 60)) / max(3, w_cv // 60)
+                white_smooth = np.convolve(white_ratio, kernel, mode='same')
+                
+                # Identify gaps (> 85% white is safer for icons)
+                is_gap = white_smooth > 0.85
+                min_gap_w = max(5, int(w_cv * 0.012))
+                
+                detected_gaps = []
+                in_gap = False
+                gs = 0
+                for x in range(w_cv):
+                    if is_gap[x] and not in_gap:
+                        gs = x
+                        in_gap = True
+                    elif not is_gap[x] and in_gap:
+                        gw = x - gs
+                        if gw >= min_gap_w:
+                            gc = gs + gw // 2
+                            # Ignore edges (15% margin)
+                            if w_cv * 0.15 < gc < w_cv * 0.85:
+                                detected_gaps.append({'center': gc * (page.width / w_cv)})
+                        in_gap = False
+                
+                # AI FALLBACK: If heuristic fails but page is wide, ask AI
+                # This handles complex 3-column layouts with icons in gutters
+                if len(detected_gaps) == 0 and page.width > 500:
+                    try:
+                        import base64, json, re
+                        from openrouter_client import get_openrouter_client
+                        client = get_openrouter_client()
+                        if client and client.is_available:
+                            img_ai = cv2.resize(img_cv, (1000, 1000)) if w_cv > 1000 else img_cv
+                            _, buffer = cv2.imencode('.jpg', img_ai, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            img_b64 = base64.b64encode(buffer).decode('utf-8')
+                            vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
+                            prompt = "Analyze the vertical column layout. Ignore icons in gutters. How many columns? Return JSON: {\"columns\": 2, \"gap_centers\": [50.5]}"
+                            response = client.call(prompt, image_base64=img_b64, timeout=12)
+                            if response:
+                                jm = re.search(r'\{.*\}', response, re.DOTALL)
+                                if jm:
+                                    ai_res = json.loads(jm.group())
+                                    if ai_res.get("columns", 1) >= 2 and ai_res.get("gap_centers"):
+                                        detected_gaps = [{'center': page.width * (gc/100.0)} for gc in ai_res["gap_centers"]]
+                    except: pass
+
+                if detected_gaps:
+                    centers = sorted([g['center'] for g in detected_gaps])
+                    col_boundaries = [0] + centers + [page.width]
+                    logger.info(f"📊 Page {page_idx+1}: detected {len(col_boundaries)-1} columns")
+            except Exception as e:
+                logger.warning(f"Column detection failed for page {page_idx+1}: {e}")
+
+            # ── Extract elements for EACH column ────────────
+            page_elements = []
+            for col_idx in range(len(col_boundaries) - 1):
+                cx1, cx2 = col_boundaries[col_idx], col_boundaries[col_idx+1]
+                
+                # Overlap pad (15px) to prevent truncation of edge characters
+                pad = 15
+                crop_bbox = (max(0, cx1 - pad), 0, min(page.width, cx2 + pad), page.height)
+                col_page = page.crop(crop_bbox)
+                
+                # 1. Words
+                raw_words = col_page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False, extra_attrs=['fontname', 'size'])
+                
+                # Filter margins
+                header_margin = min(60, page.height * 0.08)
+                footer_margin = max(page.height - 60, page.height * 0.92)
+                words = [w for w in raw_words if header_margin < ((w['top']+w['bottom'])/2) < footer_margin]
+                
+                if words:
+                    lines = _group_words_into_lines(words, page.height)
+                    paragraphs = _merge_lines_into_paragraphs(lines, page.width, page.height)
+                    avg_fs = np.mean([p['avg_size'] for p in paragraphs if p.get('avg_size')]) if paragraphs else 11
+                    for para in paragraphs:
+                        etype = "paragraph"
+                        fs = para.get('avg_size', avg_fs)
+                        text = para['text'].strip()
+                        if not text: continue
+                        if fs > avg_fs * 1.2 and len(text) < 100: etype = "heading"
+                        elif text.isupper() and len(text) < 80: etype = "heading"
+                        elif para.get('is_bold') and len(text) < 80: etype = "heading"
+                        
+                        # Ignore watermarks
+                        if _is_watermark(text):
+                            continue
+                            
+                        page_elements.append({
+                            "type": etype, "text": text, "confidence": 1.0, "bbox": para['bbox']
+                        })
+
+                # 2. Tables
+                tables = col_page.extract_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"})
+                table_finder = col_page.find_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"})
+                if tables:
+                    for t_idx, table_data in enumerate(tables):
+                        if not table_data or not any(any(c for c in r if c) for r in table_data): continue
+                        clean_table = [[(c or "").strip() for c in r] for r in table_data]
+                        table_md = _table_to_markdown(clean_table)
+                        tb = table_finder[t_idx].bbox if t_idx < len(table_finder) else [cx1, 0, cx2, 100]
+                        bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
+                        # Remove overlapping paragraphs
+                        page_elements = [e for e in page_elements if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)]
+                        
+                        # Change: [TABLE] placeholder, actual crop handled below
+                        page_elements.append({
+                            "type": "table", "text": "[TABLE]", "confidence": 1.0, "bbox": bbox, 
+                            "table_data": clean_table, "markdown_text": table_md
+                        })
+
+            if not page_elements:
+                pages_result.append({"page_num": page_idx, "elements": [], "is_empty": True})
+            else:
+                # Sort elements top-to-bottom
+                page_elements.sort(key=lambda x: (x['bbox'][1], x['bbox'][0]))
                 pages_result.append({
                     "page_num": page_idx,
-                    "elements": [],
-                    "is_empty": True,
+                    "elements": page_elements,
+                    "is_empty": False
                 })
-                continue
-            
-            # ── Group words into lines (same Y position) ──
-            lines = _group_words_into_lines(words, page.height)
-            
-            # ── Merge lines into paragraphs ──
-            paragraphs = _merge_lines_into_paragraphs(lines, page.width, page.height)
-            
-            # ── Detect headings ──
-            if paragraphs:
-                avg_font_size = np.mean([p['avg_size'] for p in paragraphs if p.get('avg_size')])
-            else:
-                avg_font_size = 11
-            
-            for para in paragraphs:
-                text = para['text'].strip()
-                if not text:
-                    continue
-                
-                # Heading detection
-                elem_type = "paragraph"
-                font_size = para.get('avg_size', avg_font_size)
-                
-                if font_size > avg_font_size * 1.2 and len(text) < 100:
-                    elem_type = "heading"
-                elif text.isupper() and len(text) < 80:
-                    elem_type = "heading"
-                elif para.get('is_bold') and len(text) < 80:
-                    elem_type = "heading"
-                
-                elements.append({
-                    "type": elem_type,
-                    "text": text,
-                    "confidence": 1.0,
-                    "bbox": para['bbox'],
-                })
-            
-            # ── Extract tables ──
-            tables = page.extract_tables({
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-            })
-            
-            if tables:
-                # Also get table bounding boxes
-                table_finder = page.find_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                })
-                
-                for t_idx, table_data in enumerate(tables):
-                    if not table_data or not any(any(cell for cell in row if cell) for row in table_data):
-                        continue
-                    
-                    # Clean table data
-                    clean_table = []
-                    for row in table_data:
-                        clean_row = [(cell or "").strip() for cell in row]
-                        clean_table.append(clean_row)
-                    
-                    table_md = _table_to_markdown(clean_table)
-                    
-                    # Get table bbox
-                    if t_idx < len(table_finder):
-                        tb = table_finder[t_idx].bbox
-                        bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
-                    else:
-                        bbox = [0, 0, int(page.width), 100]
-                    
-                    # Remove paragraph elements that overlap with this table
-                    elements = [
-                        e for e in elements
-                        if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)
-                    ]
-                    
-                    elements.append({
-                        "type": "table",
-                        "text": table_md if table_md else "[TABLE]",
-                        "confidence": 1.0,
-                        "bbox": bbox,
-                        "table_data": clean_table,
-                    })
             
             # ── Extract images ──
             if hasattr(page, 'images') and page.images:
@@ -538,20 +594,62 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                     img_w = img_bbox[2] - img_bbox[0]
                     img_h = img_bbox[3] - img_bbox[1]
                     if img_w > 50 and img_h > 50:
-                        elements.append({
+                        page_elements.append({
                             "type": "figure",
                             "text": "[FIGURE]",
                             "confidence": 1.0,
                             "bbox": img_bbox,
                         })
             
+            # ── 3. Generate Crops for Visual Elements (Requirement: "dipotong") ──
+            if any(e['type'] in ('table', 'figure') for e in page_elements):
+                try:
+                    # Render high-res for cropping
+                    crop_render = page.to_image(resolution=200)
+                    crop_img_cv = cv2.cvtColor(np.array(crop_render.original), cv2.COLOR_RGB2BGR)
+                    ch, cw = crop_img_cv.shape[:2]
+                    
+                    # Scale factor between PDF units and pixel units
+                    scale_x = cw / page.width
+                    scale_y = ch / page.height
+                    
+                    for idx, e in enumerate(page_elements):
+                        if e['type'] in ('table', 'figure'):
+                            ex1, ey1, ex2, ey2 = e['bbox']
+                            
+                            # Pad slightly
+                            pad = 10
+                            px1, py1 = max(0, int((ex1 - pad) * scale_x)), max(0, int((ey1 - pad) * scale_y))
+                            px2, py2 = min(cw, int((ex2 + pad) * scale_x)), min(ch, int((ey2 + pad) * scale_y))
+                            
+                            crop_visual = crop_img_cv[py1:py2, px1:px2]
+                            if crop_visual.size > 0:
+                                crop_fname = f"{base_name}_p{page_idx}_{e['type']}_{idx}.png"
+                                crop_path = os.path.join(output_dir, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+                                
+                                from urllib.parse import quote
+                                e['crop_url'] = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                                e['crop_local'] = crop_path
+                                logger.info(f"📸 PDF Direct Crop: {crop_fname}")
+                except Exception as ex:
+                    logger.warning(f"Failed to generate crops for page {page_idx+1}: {ex}")
+
             # Sort elements by vertical position (reading order)
-            elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
+            page_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
             
+            # Save a page preview too
+            preview_fname = f"PREVIEW_{base_name}_p{page_idx}.jpg"
+            preview_path = os.path.join(output_dir, preview_fname)
+            try:
+                page.to_image(resolution=100).save(preview_path)
+            except: pass
+
             pages_result.append({
                 "page_num": page_idx,
-                "elements": elements,
-                "is_empty": len(elements) == 0,
+                "elements": page_elements,
+                "is_empty": len(page_elements) == 0,
+                "page_image_local": preview_path
             })
     
     logger.info(

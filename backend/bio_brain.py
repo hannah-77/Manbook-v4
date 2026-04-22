@@ -41,6 +41,11 @@ class BioBrain:
         }
         self.current_context = "BAB 1"
         
+    def reset_context(self):
+        """Reset classification state for a new document."""
+        self.current_context = "BAB 1"
+        logger.info("🔄 Brain context reset to BAB 1")
+        
         # Initialize Spell Checker
         try:
             from spellchecker import SpellChecker
@@ -238,31 +243,78 @@ class BioBrain:
         
         # 1. Explicit Headers (Absolute Priority)
         for i in range(1, 8):
-            key = f"BAB {i}"
-            if key.lower() in text or f"chapter {i}" in text:
+            if f"bab {i}" in text or f"chapter {i}" in text or f"bagian {i}" in text:
+                key = f"BAB {i}" if "bab" in text or "bagian" in text else f"Chapter {i}"
+                if key not in self.taxonomy: 
+                    # Cross-map if one is missing
+                    alt_key = f"BAB {i}" if "Chapter" in key else f"Chapter {i}"
+                    key = alt_key if alt_key in self.taxonomy else key
+                
                 self.current_context = key
                 return key, self.taxonomy[key]["title"]
 
         # 2. Title Analysis
-        if rtype == 'title':
+        if rtype in ('title', 'heading'):
             best_match = None
             max_score = 0
             for code, meta in self.taxonomy.items():
-                # Count keyword hits
                 hits = sum(1 for k in meta['keywords'] if k in text)
                 if hits > max_score:
                     max_score = hits
                     best_match = code
             
+            # For headings, even 1 hit is enough to switch
             if best_match and max_score >= 1:
                 self.current_context = best_match
+            else:
+                # Stronger AI classification for ambiguous headings
+                ai_chapter = self.classify_chapter_ai(text, self.current_context)
+                if ai_chapter:
+                    self.current_context = ai_chapter
         
-        # 3. Content Analysis (Switch context only on strong signal)
-        elif rtype == 'text':
+        # 3. Content Analysis
+        elif rtype == 'text' or rtype == 'paragraph':
              for code, meta in self.taxonomy.items():
                 hits = sum(1 for k in meta['keywords'] if k in text)
-                if hits >= 3:  # Butuh setidaknya 3 keywords untuk pindah bab di tengah teks
+                # For longer text, we need stronger signal (2 hits)
+                if hits >= 2: 
                      self.current_context = code
 
         # Return Decision
         return self.current_context, self.taxonomy[self.current_context]["title"]
+
+    def classify_chapter_ai(self, text, current_chapter, lang="id"):
+        """
+        Use Gemini AI to classify which chapter the text belongs to.
+        Returns code (e.g. 'BAB 2') or None.
+        """
+        try:
+            from openrouter_client import get_openrouter_client
+            client = get_openrouter_client()
+            if not client: return None
+            
+            chapters_summary = "\n".join([f"{k}: {v['title']}" for k, v in self.taxonomy.items() if "BAB" in k])
+            
+            prompt = f"""Identify which chapter this text belongs to in a technical manual.
+Chapters:
+{chapters_summary}
+
+Text: "{text}"
+
+Current Context: {current_chapter}
+
+Guidelines:
+- If the text is a new heading, assign the most relevant BAB.
+- If it's ambiguous, return the current context.
+- Return ONLY the chapter code (e.g. 'BAB 4').
+
+Result:"""
+            result = client.call(prompt, timeout=10).strip()
+            # Extract pattern like BAB 1 or Chapter 1
+            match = re.search(r'(BAB|Chapter)\s*(\d)', result, re.IGNORECASE)
+            if match:
+                code = f"BAB {match.group(2)}"
+                return code
+        except Exception as e:
+            logger.warning(f"AI classification failed: {e}")
+        return None

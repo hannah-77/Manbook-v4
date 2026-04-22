@@ -568,7 +568,9 @@ _ENTITY_MAP_ID = {
 _ENTITY_MAP_EN = {
     # ── Brand & nama perusahaan ──────────────────────────────────
     "STINKO"      : "SINKO",
+    "SINK"        : "SINKO",
     "PRIMAL"      : "PRIMA",
+    "PRIME"       : "PRIMA",
     "TECHNOVISON" : "TECHNOVISION",
     "Elteeh"      : "Elitech",      
     "ELTEEH"      : "ELITECH",
@@ -767,4 +769,34 @@ def correct_ocr_text_with_highlights(text: str, lang: str = "id") -> dict:
     """
     corrected = correct_ocr_text(text, lang=lang)
     return {"text": corrected, "highlights": []}
+
+def correct_text_ai(text: str, lang: str = "id") -> dict:
+    """
+    Uses Gemini AI (via OpenRouter) to normalize and fix text.
+    Best for Word documents or high-quality OCR where grammar/phrasing matters.
+    """
+    if not text or len(text.strip()) < 5:
+        return {"text": text, "highlights": []}
+        
+    try:
+        from openrouter_client import get_openrouter_client
+        client = get_openrouter_client()
+        if not client: return {"text": text, "highlights": []}
+        
+        lang_label = "Indonesian" if lang == "id" else "English"
+        prompt = f"""Normalize and fix this technical manual text found in a {lang_label} document.
+Fix spelling, grammar, and formatting errors while PRESERVING technical terms and product names.
+Return ONLY the corrected text.
+
+TEXT:
+{text}"""
+
+        corrected = client.call(prompt, timeout=15)
+        if corrected and len(corrected) > 5:
+            # Simple highlight detection (anything changed)
+            return {"text": corrected.strip(), "highlights": []}
+    except Exception as e:
+        logger.warning(f"AI correction failed: {e}")
+        
+    return {"text": text, "highlights": []}
 
