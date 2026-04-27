@@ -22,7 +22,7 @@ logger = logging.getLogger("OpenRouterClient")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-AI_MODEL           = os.getenv("AI_MODEL",    "minimax/minimax-m2.5")
+AI_MODEL           = os.getenv("AI_MODEL") or os.getenv("AI_VISION_MODEL") or "google/gemini-2.0-flash-001"
 AI_PROVIDER        = os.getenv("AI_PROVIDER", "")  # Empty = auto-select
 AI_ALLOW_FALLBACKS = os.getenv("AI_ALLOW_FALLBACKS", "false").strip().lower() in ("true", "1", "yes")
 

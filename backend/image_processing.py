@@ -73,9 +73,6 @@ def split_columns_simple(image_path, filename_base, output_dir):
     if img is None:
         return [image_path]
         
-    # --- OPTIONAL: Enhance before column splitting ---
-    # img = remove_watermarks_and_enhance(img)
-    
     h, w = img.shape[:2]
     
     # Minimum width for multi-column detection (small documents are usually 1 column)
@@ -87,66 +84,107 @@ def split_columns_simple(image_path, filename_base, output_dir):
     _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
     
     # Vertical projection: calculate white pixel ratio per column-x
-    # Ignore top 10% and bottom 10% (header/footer are usually full-width)
-    margin_y = int(h * 0.10)
+    # Ignore top 8% and bottom 8% (header/footer are usually full-width)
+    margin_y = int(h * 0.08)
     roi = binary[margin_y:h - margin_y, :]
     
     # Calculate % white pixels per x-column
     white_ratio = np.mean(roi == 255, axis=0)  # array shape (w,)
     
-    # Smooth with moving average to remove noise
-    kernel_size = max(10, w // 80)
-    kernel = np.ones(kernel_size) / kernel_size
+    # Robust smoothing — proportional to image width
+    # Use 1% of width for strong noise reduction (e.g. 35px for 3508px wide A4 @ 300dpi)
+    k_size = max(7, int(w * 0.01))
+    kernel = np.ones(k_size) / k_size
     white_smooth = np.convolve(white_ratio, kernel, mode='same')
     
-    # Region that is "almost all white" (> 90%) → column gap
-    gap_threshold = 0.90
-    is_gap = white_smooth > gap_threshold
-    
-    # Minimum gap width (set to a more conservative 3.5% of page width)
-    # Real column gutters in manuals are usually quite wide.
-    min_gap_width = max(40, int(w * 0.035))
-    
     # Skip column splitting for the first page (Cover Page) if it looks like a cover
-    is_cover = "_0.png" in image_path.lower() or image_path.endswith("_0.jpg")
+    # Only match actual page-0 naming patterns from OCR pipeline (page_xxx_0.png)
+    # NOT DOCX preview files (DOCX_FULL_xxx_0.jpg, DOCX_xxx_0.jpg)
+    basename = os.path.basename(image_path).lower()
+    is_docx_preview = basename.startswith("docx_")
+    is_cover = (not is_docx_preview) and (
+        "_0.png" in basename or 
+        basename.endswith("_0.jpg") or 
+        "cover" in basename
+    )
     if is_cover:
         # For cover pages, use an even stricter gap requirement (5%)
         min_gap_width_current = int(w * 0.05) 
         gap_threshold_current = 0.98  # Very white
         is_gap_current = white_smooth > gap_threshold_current
+        
+        # Find contiguous gap segments (cover page only)
+        gaps = []
+        in_gap = False
+        gap_start = 0
+        for x in range(w):
+            if is_gap_current[x] and not in_gap:
+                gap_start = x
+                in_gap = True
+            elif not is_gap_current[x] and in_gap:
+                gap_width = x - gap_start
+                if gap_width >= min_gap_width_current:
+                    gap_center = gap_start + gap_width // 2
+                    if gap_center > w * 0.05 and gap_center < w * 0.95:
+                        gaps.append(gap_center)
+                in_gap = False
     else:
-        is_gap_current = is_gap
-        min_gap_width_current = min_gap_width
- 
-    # Find contiguous gap segments
-    gaps = []
-    in_gap = False
-    gap_start = 0
-    
-    for x in range(w):
-        if is_gap_current[x] and not in_gap:
-            gap_start = x
-            in_gap = True
-        elif not is_gap_current[x] and in_gap:
-            gap_width = x - gap_start
-            if gap_width >= min_gap_width_current:
-                gap_center = gap_start + gap_width // 2
-                # Ignore gaps too close to edges (within 15% of page width)
-                if gap_center > w * 0.15 and gap_center < w * 0.85:
-                    gaps.append(gap_center)
+        # ── Multi-pass gap detection: strict → lenient ──
+        # Real column gutters are consistently white (>95%) through the full page height.
+        # False positives from margins, indented text, etc only appear at lower thresholds.
+        # Start strict and work down — first valid result wins.
+        gaps = []
+        pass_configs = [
+            # (threshold, min_gap_width_pct, description)
+            (0.95, 0.02, "strict"),    # Real column gutters: >95% white, >2% page width
+            (0.90, 0.015, "medium"),   # Slightly less strict
+            (0.85, 0.012, "lenient"),  # More tolerant
+        ]
+        
+        for pass_thresh, pass_min_pct, pass_desc in pass_configs:
+            is_gap_pass = white_smooth > pass_thresh
+            min_gap_w = max(10, int(w * pass_min_pct))
+            
+            pass_gaps = []
             in_gap = False
+            gap_start = 0
+            for x in range(w):
+                if is_gap_pass[x] and not in_gap:
+                    gap_start = x
+                    in_gap = True
+                elif not is_gap_pass[x] and in_gap:
+                    gap_width = x - gap_start
+                    if gap_width >= min_gap_w:
+                        gap_center = gap_start + gap_width // 2
+                        if gap_center > w * 0.05 and gap_center < w * 0.95:
+                            pass_gaps.append(gap_center)
+                    in_gap = False
+            
+            if pass_gaps:
+                # Filter close gaps
+                pass_gaps.sort()
+                filtered = [pass_gaps[0]]
+                for g in pass_gaps[1:]:
+                    if g - filtered[-1] > w * 0.15:
+                        filtered.append(g)
+                
+                num_found = len(filtered) + 1
+                if 2 <= num_found <= 4:
+                    gaps = filtered
+                    logger.info(f"   Column detection pass '{pass_desc}' (thresh={pass_thresh}, minW={min_gap_w}px): found {num_found} cols, gaps at {gaps}")
+                    break  # Use first valid result
     
     if not gaps:
         return [image_path]
     
-    # Filter gaps that are too close to each other (less than 20% of width)
-    # Each column should be at least 20% of the page width
+    # Filter gaps that are too close to each other (less than 15% of width)
+    # Each column should be at least 15% of the page width
     filtered_gaps = []
     if gaps:
         gaps.sort()
         filtered_gaps.append(gaps[0])
         for g in gaps[1:]:
-            if g - filtered_gaps[-1] > w * 0.20:
+            if g - filtered_gaps[-1] > w * 0.15:
                 filtered_gaps.append(g)
     
     gaps = filtered_gaps
@@ -157,26 +195,34 @@ def split_columns_simple(image_path, filename_base, output_dir):
     
     # Skip splitting if columns are too unbalanced or narrow
     if num_cols > 1:
+        col_widths = []
         valid_cols = []
         for i in range(num_cols):
             cw = col_boundaries[i+1] - col_boundaries[i]
-            if cw > w * 0.20: # Column must be at least 20% of page
+            col_widths.append(cw)
+            if cw > w * 0.10:  # Column must be at least 10% of page
                 valid_cols.append(i)
         
         if len(valid_cols) < 2:
-            logger.info("📊 Column split: candidates found but too narrow/unbalanced, defaulting to single column")
+            logger.info("Column split: candidates found but too narrow/unbalanced, defaulting to single column")
+            return [image_path]
+        
+        # Balance check: widest valid column shouldn't be >3x the narrowest valid
+        valid_widths = [col_widths[i] for i in valid_cols]
+        if max(valid_widths) > 3 * min(valid_widths):
+            logger.info(f"Column split: unbalanced widths {[int(cw) for cw in col_widths]}, defaulting to single column")
             return [image_path]
  
-    # Sanity: max 3 columns (manual books rarely have 4 real text columns)
-    if num_cols > 3:
-        logger.warning(f"Too many columns detected ({num_cols}) — likely noise, capping at 3")
-        gaps = gaps[:2]
+    # Sanity: max 4 columns (manual books can have 4 columns)
+    if num_cols > 4:
+        logger.warning(f"Too many columns detected ({num_cols}), capping at 4")
+        gaps = gaps[:3]
         col_boundaries = [0] + sorted(gaps) + [w]
         num_cols = len(col_boundaries) - 1
     
-    logger.info(f"📊 Column split: detected {num_cols} columns")
+    logger.info(f"Column split: detected {num_cols} columns (w={w}, h={h}, gaps={gaps})")
     
-    # Crop each column
+    # Crop each column and save as high-quality PNG for OCR
     column_paths = []
     for col_idx in range(num_cols):
         col_x1 = int(col_boundaries[col_idx])

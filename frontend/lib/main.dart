@@ -44,6 +44,10 @@ class _ManbookHomeState extends State<ManbookHome> {
   bool _isTranslated = false;
   bool _directTranslate = false; // Bypass OCR & BioBrain option
   
+  // AI Cover Info (from backend)
+  String _aiProductName = '';
+  String _aiProductDesc = '';
+  
   // Progress tracking
   String? _sessionId;
   int _currentPage = 0;
@@ -469,6 +473,8 @@ class _ManbookHomeState extends State<ManbookHome> {
             _totalPages = data['total_pages'] ?? 0;
             _missingChapters = List<String>.from(
                 (data['missing_chapters'] ?? []).map((e) => e.toString()));
+            _aiProductName = (data['ai_product_name'] ?? '') as String;
+            _aiProductDesc = (data['ai_product_desc'] ?? '') as String;
 
             _currentPreviewPage = 0;
             _pageController = PageController(initialPage: 0);
@@ -1051,8 +1057,8 @@ class _ManbookHomeState extends State<ManbookHome> {
 
   Widget _buildPdfPreview() {
     print("🖼️ Clean Pages (${_cleanPages.length}): ${_cleanPages.take(2)}");
-    // 1. SHOW CLEANED PAGES (Result) with Zoom controls
-    if (_cleanPages.isNotEmpty) {
+    // 1. SHOW IMAGE CROPS (if we have clean pages from OCR/Vision)
+    if (_cleanPages.isNotEmpty && _selectedFilePath != null) {
       return Container(
         decoration: BoxDecoration(
           color: Colors.white,
@@ -1075,7 +1081,7 @@ class _ManbookHomeState extends State<ManbookHome> {
                      const SizedBox(width: 8),
                      Expanded(
                        child: Text(
-                         "📐 LAYOUT PREVIEW (${_cleanPages.length} Columns/Pages)",
+                         "📐 LAYOUT PREVIEW (${_cleanPages.length} Segments)",
                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)
                        ),
                      ),
@@ -1198,11 +1204,15 @@ class _ManbookHomeState extends State<ManbookHome> {
                                child: Container(
                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                  decoration: BoxDecoration(
-                                   color: Colors.black87,
+                                   color: _cleanPages[index].contains('COL_') || _cleanPages[index].contains('_c')
+                                       ? const Color(0xFF059669)  // Green for column crops
+                                       : Colors.black87,          // Dark for full pages
                                    borderRadius: BorderRadius.circular(20),
                                  ),
                                  child: Text(
-                                   "Page ${index + 1} of ${_cleanPages.length}",
+                                   _cleanPages[index].contains('COL_') || _cleanPages[index].contains('_c')
+                                       ? "Column ${index + 1} of ${_cleanPages.length}"
+                                       : "Page ${index + 1} of ${_cleanPages.length}",
                                    style: const TextStyle(color: Colors.white, fontSize: 12),
                                  ),
                                ),
@@ -1269,14 +1279,17 @@ class _ManbookHomeState extends State<ManbookHome> {
                             Icon(Icons.description, size: 80, color: Colors.blue[300]),
                             const SizedBox(height: 20),
                             const Text(
-                              "Word Document Preview",
+                              "Word Preview Issue",
                               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87),
                             ),
                             const SizedBox(height: 10),
-                            const Text(
-                              "Format DOCX tidak dapat di-preview secara visual.\nSilakan lihat hasil ekstraksi di panel kanan.",
-                              textAlign: TextAlign.center,
-                              style: TextStyle(fontSize: 14, color: Colors.black54),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 40),
+                              child: Text(
+                                "Sistem gagal merender layout visual file Word ini.\n\nTips Agar Preview Muncul:\n1. Pastikan Microsoft Word di komputer server tertutup.\n2. Pastikan tidak ada dialog 'Save As' atau aktivasi Word yang terbuka.\n3. Cara termudah: Simpan file Word Anda sebagai PDF, lalu upload kembali.\n\nAnda tetap bisa melihat hasil ekstraksi teks di panel kanan.",
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 14, color: Colors.black54, height: 1.5),
+                              ),
                             ),
                           ],
                         ),
@@ -1386,6 +1399,7 @@ class _ManbookHomeState extends State<ManbookHome> {
       'introduction', 'pendahuluan', 'kata pengantar', 'preface',
       'petunjuk pengguna', 'petunjuk pemakaian', 'user guide',
       'owner manual', 'service manual', 'manual pengguna', 'panduan pengguna',
+      'overview', 'general', 'safety', 'peringatan', 'warning', 'tinjauan'
     ];
 
     bool isGeneric(String text) {
@@ -1398,53 +1412,64 @@ class _ManbookHomeState extends State<ManbookHome> {
       return lower.contains('elitech') || lower.contains('technovision') || lower.startsWith('pt.');
     }
 
-    // Collect heading candidates (non-generic, non-brand) from chapter 1
-    String productName = _selectedFileName ?? 'Dokumen';
-    String productDesc = '';
+    // ── Use AI-extracted cover info if available (clean & concise) ──
+    String productName = _aiProductName.isNotEmpty 
+        ? _aiProductName 
+        : (_selectedFileName ?? 'Dokumen');
+    String productDesc = _aiProductDesc;
     
-    final List<Map<String, dynamic>> bab1Items = [];
-    for (var item in _results) {
-      if (item['chapter_id'] == firstChapterKey) {
-        bab1Items.add(item);
-      }
-    }
-
-    int productNameIdx = -1;
-    final List<int> headingIndices = [];
-    
-    for (int i = 0; i < bab1Items.length; i++) {
-      final type = (bab1Items[i]['type'] ?? '').toString();
-      final t = (bab1Items[i]['normalized'] ?? '').toString().trim();
-      if ((type == 'title' || type == 'heading') && t.length > 2 && !isGeneric(t)) {
-        // Hanya tambahkan ke index jika BUKAN brand
-        if (!isBrand(t)) {
-           headingIndices.add(i);
+    // Fallback: extract from chapter data only if AI didn't provide
+    if (_aiProductName.isEmpty) {
+      final List<Map<String, dynamic>> bab1Items = [];
+      for (var item in _results) {
+        if (item['chapter_id'] == firstChapterKey) {
+          bab1Items.add(item);
         }
       }
-    }
 
-    // Prefer heading with digits (model number) as product name
-    if (headingIndices.isNotEmpty) {
-      int bestIdx = headingIndices.firstWhere(
-        (idx) => (bab1Items[idx]['normalized'] ?? '').toString().contains(RegExp(r'\d')),
-        orElse: () => headingIndices.first,
-      );
-      productNameIdx = bestIdx;
-      productName = (bab1Items[bestIdx]['normalized'] ?? '').toString().trim();
-    }
-
-    // Extract description: next text item after product name
-    if (productNameIdx >= 0 && productNameIdx < bab1Items.length - 1) {
-      for (int i = productNameIdx + 1; i < bab1Items.length; i++) {
+      int productNameIdx = -1;
+      final List<int> headingIndices = [];
+      
+      for (int i = 0; i < bab1Items.length; i++) {
         final type = (bab1Items[i]['type'] ?? '').toString();
-        if (type == 'title' || type == 'heading' || type == 'paragraph') {
-          final t = (bab1Items[i]['normalized'] ?? '').toString().trim();
-          if (t.length > 3 && !isGeneric(t) && !isBrand(t)) {
-            productDesc = t;
-            break;
+        final t = (bab1Items[i]['normalized'] ?? '').toString().trim();
+        if ((type == 'title' || type == 'heading') && t.length > 2 && !isGeneric(t)) {
+          if (!isBrand(t)) {
+             headingIndices.add(i);
           }
         }
       }
+
+      // Prefer heading with digits (model number) as product name
+      if (headingIndices.isNotEmpty) {
+        int bestIdx = headingIndices.firstWhere(
+          (idx) => (bab1Items[idx]['normalized'] ?? '').toString().contains(RegExp(r'\d')),
+          orElse: () => headingIndices.first,
+        );
+        productNameIdx = bestIdx;
+        productName = (bab1Items[bestIdx]['normalized'] ?? '').toString().trim();
+      }
+
+      // Extract description: next SHORT text item after product name (MAX 15 words)
+      if (productDesc.isEmpty && productNameIdx >= 0 && productNameIdx < bab1Items.length - 1) {
+        for (int i = productNameIdx + 1; i < bab1Items.length; i++) {
+          final type = (bab1Items[i]['type'] ?? '').toString();
+          if (type == 'title' || type == 'heading' || type == 'paragraph') {
+            final t = (bab1Items[i]['normalized'] ?? '').toString().trim();
+            final wordCount = t.split(RegExp(r'\s+')).length;
+            // STRICT: Only use as description if it's SHORT (max 15 words)
+            if (t.length > 3 && wordCount <= 15 && !isGeneric(t) && !isBrand(t)) {
+              productDesc = t;
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // Safety: truncate description if it's still too long somehow
+    if (productDesc.length > 80) {
+      productDesc = '${productDesc.substring(0, 77)}...';
     }
 
     var sortedKeys = chapters.keys.toList();

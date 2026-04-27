@@ -1249,7 +1249,7 @@ Output ONLY the JSON array, nothing else."""
             "true", "1", "yes", "on"
         )
 
-        if not direct_translate and ai_enabled and elements:
+        if ai_enabled and elements:
             logger.info(f"🧠 Stage 3: AI chapter classification (text-only, lang={lang})...")
             classifications = self._classify_chapters_ai(elements, lang=lang)
 

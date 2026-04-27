@@ -46,6 +46,15 @@ from bio_architect import BioArchitect
 from language_filter import enforce_language, enforce_language_on_items, get_language_instruction, clean_text
 from image_processing import convert_pdf_to_images_safe, split_columns_simple
 from orchestrator import SystemOrchestrator
+import pdfplumber
+import PyPDF2
+import docx
+from docx import Document
+import urllib.parse
+from urllib.parse import quote
+import langdetect
+from langdetect import detect, DetectorFactory
+import base64
 
 try:
     from vision_engine import create_vision_engine
@@ -234,24 +243,56 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                     try:
                         from docx2pdf import convert
                         import pythoncom
-                        pythoncom.CoInitialize() # Required for Windows COM
+                        import win32com.client
                         
-                        pdf_preview = temp_path.replace(".docx", "_preview.pdf")
-                        convert(temp_path, pdf_preview)
+                        pythoncom.CoInitialize()
                         
-                        if os.path.exists(pdf_preview):
-                            preview_imgs = convert_pdf_to_images_safe(pdf_preview)
+                        # Use absolute paths for COM-based conversion
+                        abs_temp_path = os.path.abspath(temp_path)
+                        abs_pdf_preview = os.path.abspath(temp_path.replace(".docx", "_preview.pdf").replace(".doc", "_preview.pdf"))
+                        
+                        logger.info(f"🔄 Converting DOCX to PDF for preview: {abs_temp_path}")
+                        
+                        # Use docx2pdf with explicit paths
+                        convert(abs_temp_path, abs_pdf_preview)
+                        
+                        if os.path.exists(abs_pdf_preview):
+                            preview_imgs = convert_pdf_to_images_safe(abs_pdf_preview)
                             for idx, img in enumerate(preview_imgs):
-                                img_fname = f"DOCX_PREVIEW_{session_id}_{idx}.jpg"
-                                img_path = os.path.join(OUTPUT_DIR, img_fname)
-                                img.save(img_path, "JPEG", quality=80)
-                                from urllib.parse import quote
-                                clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(img_fname)}")
+                                # Save full page at HIGH quality — critical for column gap detection
+                                full_img_fname = f"DOCX_FULL_{session_id}_{idx}.jpg"
+                                full_img_path = os.path.join(OUTPUT_DIR, full_img_fname)
+                                img.save(full_img_path, "JPEG", quality=95)
                                 
-                            os.remove(pdf_preview)
-                            logger.info(f"🖼️ Generated {len(clean_pages_urls)} preview images for DOCX")
+                                # Split into columns
+                                try:
+                                    col_paths = split_columns_simple(full_img_path, f"DOCX_{session_id}_{idx}", OUTPUT_DIR)
+                                    logger.info(f"📐 DOCX Preview Page {idx}: split_columns returned {len(col_paths)} paths")
+                                    if len(col_paths) > 1:
+                                        for col_path in col_paths:
+                                            col_basename = os.path.basename(col_path)
+                                            clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(col_basename)}")
+                                    else:
+                                        clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(full_img_fname)}")
+                                except Exception as e_col:
+                                    logger.warning(f"DOCX Column split failed: {e_col}")
+                                    clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(full_img_fname)}")
+                                
+                            try: os.remove(abs_pdf_preview)
+                            except: pass
+                            logger.info(f"🖼️ Generated {len(clean_pages_urls)} preview items for DOCX")
+                        else:
+                            logger.error(f"DOCX Preview: PDF file was not created at {abs_pdf_preview}")
+                            
                     except Exception as e_preview:
-                        logger.warning(f"Failed to generate DOCX preview images: {e_preview}")
+                        logger.error(f"Failed to generate DOCX preview images: {str(e_preview)}")
+                        
+                        # FALLBACK: Use images extracted directly from DOCX as "preview"
+                        if not clean_pages_urls:
+                            logger.info("Using extracted figures as fallback preview for DOCX")
+                            for elem in elements:
+                                if elem.get('type') == 'figure' and elem.get('crop_url'):
+                                    clean_pages_urls.append(elem['crop_url'])
                         
                     progress_tracker[session_id].update({"status": "processing", "percentage": 80})
             except Exception as e:
@@ -295,7 +336,6 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             custom_product_desc=ai_prod_desc
         )
 
-        from urllib.parse import quote
         word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
         pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result.get('pdf_file') else None
 
@@ -318,7 +358,9 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             "results": structured_data,
             "word_url": word_url,
             "pdf_url": pdf_url,
-            "clean_pages": clean_pages_urls
+            "clean_pages": clean_pages_urls,
+            "ai_product_name": ai_prod_name or "",
+            "ai_product_desc": ai_prod_desc or ""
         }
 
     except Exception as e:
@@ -334,9 +376,6 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
 @app.post("/generate_chapter")
 async def generate_chapter(req: GenerateChapterRequest):
     try:
-        from openrouter_client import get_openrouter_client
-        import json, re
-        
         client = get_openrouter_client()
         if not client:
             return {"success": False, "error": "AI client not configured."}
@@ -376,10 +415,6 @@ async def check_chapter_completeness(req: CheckCompletenessRequest):
     lengkap dibandingkan dengan gambar asli dokumen.
     """
     try:
-        from openrouter_client import get_openrouter_client
-        import base64
-        import re
-        
         # 1. Kumpulkan gambar sumber unik untuk bab ini
         source_images = set()
         extracted_texts = []
@@ -478,7 +513,6 @@ async def generate_custom_report(req: GenerateReportRequest):
             custom_product_name=req.custom_product_name,
             custom_product_desc=req.custom_product_desc
         )
-        from urllib.parse import quote
         word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
         pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result.get('pdf_file') else None
         return {"success": True, "word_url": word_url, "pdf_url": pdf_url}
@@ -494,12 +528,11 @@ async def recrop_image(req: RecropRequest):
         crop_fname = f"recrop_{uuid.uuid4().hex[:6]}.png"
         crop_path = os.path.join(OUTPUT_DIR, crop_fname)
         cv2.imwrite(crop_path, crop)
-        from urllib.parse import quote
         return {"success": True, "crop_url": f"http://127.0.0.1:8000/output/{quote(crop_fname)}", "crop_local": crop_path}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-from langdetect import detect, DetectorFactory
+# Language detection settings
 DetectorFactory.seed = 0
 
 def _detect_lang_from_text(text: str, filename: str = "") -> dict:
@@ -575,7 +608,6 @@ async def detect_language(file: UploadFile = File(...)):
         # Quick text extraction for sampling
         if ext.endswith('.pdf'):
             try:
-                import PyPDF2
                 with open(temp_path, 'rb') as f:
                     reader = PyPDF2.PdfReader(f)
                     for i in range(min(3, len(reader.pages))):
@@ -583,7 +615,6 @@ async def detect_language(file: UploadFile = File(...)):
             except: pass
         elif ext.endswith('.docx'):
             try:
-                from docx import Document
                 doc = Document(temp_path)
                 for p in doc.paragraphs[:15]:
                     sample_text += p.text + " "

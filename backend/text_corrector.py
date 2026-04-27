@@ -572,6 +572,13 @@ _ENTITY_MAP_EN = {
     "PRIMAL"      : "PRIMA",
     "PRIME"       : "PRIMA",
     "TECHNOVISON" : "TECHNOVISION",
+    "GERMAN"      : "PERMAI",   # Fix AI hallucination
+    "OSOWILANGUN" : "OSOWILANGUN", # Protect
+    "PERMAI"      : "PERMAI",      # Protect
+    "SINKO"       : "SINKO",       # Protect
+    "PRIMA"       : "PRIMA",       # Protect
+    
+    # Existing...
     "Elteeh"      : "Elitech",      
     "ELTEEH"      : "ELITECH",
     "Eltechf"     : "Elitech",

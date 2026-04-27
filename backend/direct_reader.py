@@ -16,7 +16,12 @@ import re
 import cv2
 import logging
 import numpy as np
+import json
+import base64
 from pathlib import Path
+import pdfplumber
+import PyPDF2
+from docx import Document
 
 logger = logging.getLogger("BioManual.DirectReader")
 
@@ -118,20 +123,13 @@ def is_text_pdf(pdf_path: str, sample_pages: int = 5) -> dict:
 def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
     """
     Extract content directly from DOCX using python-docx.
-    
-    Returns list of elements in the same format as vision_engine.scan_document():
-    [
-        {"type": "heading", "text": "...", "confidence": 1.0, "bbox": [...], ...},
-        {"type": "paragraph", "text": "...", "confidence": 1.0, "bbox": [...], ...},
-        {"type": "table", "text": "[TABLE]", "confidence": 1.0, "bbox": [...], 
-         "table_data": [[...], ...], ...},
-        {"type": "figure", "text": "[FIGURE]", "confidence": 1.0, "bbox": [...], ...},
-    ]
     """
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    
-    doc = Document(docx_path)
+    try:
+        with open(docx_path, 'rb') as f:
+            doc = Document(f)
+    except Exception as e:
+        logger.error(f"Failed to open DOCX: {e}")
+        return []
     elements = []
     y_position = 0  # Simulated vertical position for ordering
     LINE_HEIGHT = 30  # Simulated line height in pixels
@@ -425,7 +423,6 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
         ]
     }
     """
-    import pdfplumber
     import cv2
     import numpy as np
     
@@ -487,7 +484,6 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                 # This handles complex 3-column layouts with icons in gutters
                 if len(detected_gaps) == 0 and page.width > 500:
                     try:
-                        import base64, json, re
                         from openrouter_client import get_openrouter_client
                         client = get_openrouter_client()
                         if client and client.is_available:
