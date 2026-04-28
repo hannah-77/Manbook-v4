@@ -702,6 +702,8 @@ class _ManbookHomeState extends State<ManbookHome> {
                           items: _results,
                           originalFilename: _selectedFileName ?? 'document',
                           language: _selectedLanguage,
+                          aiProductName: _aiProductName,
+                          aiProductDesc: _aiProductDesc,
                         ),
                       ),
                     );

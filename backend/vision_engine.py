@@ -329,17 +329,36 @@ class BioVisionHybrid:
             white_pixels = np.sum(gray > 220)
             white_ratio = white_pixels / (ch * cw)
 
-            # Visual content: high edges + either colorful or not mostly white
+            # 3b. Dark ratio: heading banners have >50% dark pixels
+            dark_pixels = np.sum(gray < 50)
+            dark_ratio = dark_pixels / (ch * cw)
+
+            # SPECIAL: Dark-background text blocks (e.g. "User Notice" on black bg)
+            # These are boxes with mostly dark pixels — if they lack color variance, they are NOT visual content
+            if dark_ratio > 0.40 and color_var < 20:
+                logger.debug(
+                    f"VisualCheck bbox={bbox}: DARK TEXT BLOCK detected "
+                    f"(dark_ratio={dark_ratio:.2f}, color_var={color_var:.1f}) -> NOT visual"
+                )
+                return False
+
+            # 4. Non-white pixel ratio: photos/diagrams have colored pixels
+            #    that are neither white (>220) nor black text (<50)
+            colored_pixels = np.sum((gray > 50) & (gray < 220))
+            colored_ratio = colored_pixels / (ch * cw)
+
+            # Visual content: multiple heuristics (relaxed to catch product photos on white bg)
             is_visual = (
-                (edge_ratio > 0.08 and white_ratio < 0.65)  # Dense edges, not plain text
-                or (color_var > 30)                           # Colorful content
-                or (edge_ratio > 0.12)                        # Very high edge density (diagrams)
+                (edge_ratio > 0.06 and white_ratio < 0.80)  # Edges + not all-white
+                or (color_var > 15)                           # Any significant color (yellow device etc.)
+                or (edge_ratio > 0.08)                        # Moderate edge density (diagrams)
+                or (colored_ratio > 0.05 and white_ratio < 0.90)  # Has colored content (product photos)
             )
 
             logger.debug(
                 f"VisualCheck bbox={bbox}: edge_ratio={edge_ratio:.3f}, "
                 f"color_var={color_var:.1f}, white_ratio={white_ratio:.2f}, "
-                f"is_visual={is_visual}"
+                f"colored_ratio={colored_ratio:.3f}, is_visual={is_visual}"
             )
             return is_visual
 
@@ -446,7 +465,35 @@ class BioVisionHybrid:
                 label_counts[label] = label_counts.get(label, 0) + 1
 
                 # Validate: if Surya says 'figure', check if it's actually visual content
-                # Many false positives: Surya labels caption text ("Figure 11") as 'figure'
+                # Only override for SMALL regions — for larger ones, trust Surya's ML model
+                if rtype == 'figure':
+                    region_w = x2 - x1
+                    region_h = y2 - y1
+
+                    # DARK BOX CHECK: Dark strips or boxes are often text blocks
+                    # e.g. "User Notice", "WARNING" with black/dark background
+                    fig_crop = image_cv[max(0,y1):min(image_cv.shape[0],y2), 
+                                        max(0,x1):min(image_cv.shape[1],x2)]
+                    if fig_crop.size > 0:
+                        fig_gray = cv2.cvtColor(fig_crop, cv2.COLOR_BGR2GRAY)
+                        fig_dark = np.sum(fig_gray < 80) / (fig_crop.shape[0] * fig_crop.shape[1])
+                        
+                        # Check color variance to ensure it's not a dark product photo
+                        hsv = cv2.cvtColor(fig_crop, cv2.COLOR_BGR2HSV)
+                        color_var = float(np.std(hsv[:, :, 1]))
+                        
+                        # If it's very dark and lacks vibrant colors, it's a text box, not a figure
+                        if fig_dark > 0.40 and color_var < 20:
+                            fig_aspect = region_w / max(region_h, 1)
+                            # Wide banners = heading, tall boxes = paragraph
+                            new_type = 'heading' if fig_aspect > 2.5 else 'paragraph'
+                            logger.info(
+                                f"🏷️ Dark text block detected ({region_w}x{region_h}, "
+                                f"{fig_dark:.0%} dark), reclassifying figure->{new_type}: "
+                                f"bbox=[{x1},{y1},{x2},{y2}]"
+                            )
+                            rtype = new_type
+
                 if rtype == 'figure':
                     region_w = x2 - x1
                     region_h = y2 - y1
@@ -457,13 +504,17 @@ class BioVisionHybrid:
                             f"bbox=[{x1},{y1},{x2},{y2}]"
                         )
                         rtype = 'paragraph'
-                    # Check if region has actual visual content (not just text on white)
-                    elif not self._is_visual_content(image_cv, [x1, y1, x2, y2]):
-                        logger.debug(
-                            f"Figure region has no visual content, reclassifying as paragraph: "
-                            f"bbox=[{x1},{y1},{x2},{y2}]"
-                        )
-                        rtype = 'paragraph'
+                    # Medium-sized regions: check visual content but trust Surya for larger ones
+                    elif region_w < 150 and region_h < 150:
+                        if not self._is_visual_content(image_cv, [x1, y1, x2, y2]):
+                            logger.debug(
+                                f"Small figure region has no visual content, reclassifying as paragraph: "
+                                f"bbox=[{x1},{y1},{x2},{y2}]"
+                            )
+                            rtype = 'paragraph'
+                    # Large regions (≥150px both dims): trust Surya's ML classification
+                    # Surya is trained on document layouts and is more reliable than
+                    # simple edge/color heuristics for product photos on white backgrounds
 
                 regions.append({
                     "type": rtype,
@@ -553,15 +604,26 @@ class BioVisionHybrid:
         try:
             h, w = crop.shape[:2]
 
+            # 0. DARK BACKGROUND INVERSION: If the crop has a mostly dark background
+            #    (like heading banners with white text on black), invert colors so
+            #    OCR can read the text properly (OCR is optimized for dark-on-light)
+            gray_check = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            dark_pixels = np.sum(gray_check < 80)
+            dark_ratio = dark_pixels / (h * w)
+            if dark_ratio > 0.40:
+                logger.debug(f"Dark background detected ({dark_ratio:.0%} dark), inverting for OCR")
+                clean = cv2.bitwise_not(crop)
+            else:
+                clean = crop.copy()
+
             # 1. Remove red/pink watermarks using HSV color masking
-            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(clean, cv2.COLOR_BGR2HSV)
             mask1 = cv2.inRange(hsv, np.array([0,  30,  30]), np.array([10,  255, 255]))
             mask2 = cv2.inRange(hsv, np.array([160, 30, 30]), np.array([180, 255, 255]))
             mask3 = cv2.inRange(hsv, np.array([10,  50, 50]), np.array([25,  255, 255]))
             watermark_mask = mask1 + mask2 + mask3
             kernel = np.ones((3, 3), np.uint8)
             watermark_mask = cv2.dilate(watermark_mask, kernel, iterations=2)
-            clean = crop.copy()
             clean[watermark_mask > 0] = (255, 255, 255)
 
             # 2. Denoise (bilateral: preserves edges, removes noise)
@@ -986,6 +1048,26 @@ Output ONLY the JSON array, nothing else."""
             # ── 2B: Full-page OCR for ALL text ──
             # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
             text_line_count = 0
+            
+            # INVERT DARK REGIONS PRE-OCR: PaddleOCR struggles with white-on-black text
+            # We invert dark regions (like "User Notice" boxes) in-place on the image 
+            # so the text becomes black-on-white and easily readable.
+            for region in regions:
+                if region['type'] in ('heading', 'paragraph'):
+                    rx1, ry1, rx2, ry2 = region['bbox']
+                    pad = 5
+                    px1, py1 = max(0, rx1 - pad), max(0, ry1 - pad)
+                    px2, py2 = min(w, rx2 + pad), min(h, ry2 + pad)
+                    
+                    crop = original_img[py1:py2, px1:px2]
+                    if crop.size > 0:
+                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        dark_ratio = np.sum(gray < 80) / (crop.shape[0] * crop.shape[1])
+                        if dark_ratio > 0.40:
+                            # Invert the region in-place
+                            original_img[py1:py2, px1:px2] = cv2.bitwise_not(crop)
+                            logger.info(f"🔄 Inverted dark region before OCR: [{rx1},{ry1},{rx2},{ry2}] (dark_ratio={dark_ratio:.2f})")
+            
             try:
                 full_page_result = self.ocr_engine.ocr(original_img, cls=False)
 

@@ -1,0 +1,26 @@
+# BAB II
+# TINJAUAN PUSTAKA
+
+## 2.1 *Optical Character Recognition* (OCR)
+*Optical Character Recognition* (OCR) merupakan teknologi pengenalan pola yang mengonversi gambar teks cetak atau tulisan tangan menjadi teks digital yang dapat dibaca dan diedit oleh mesin. Pada sistem manajemen dokumen, OCR memiliki peran krusial dalam mendigitalisasi dokumen fisik. Dalam proyek ini, pendekatan multi-mesin (multi-engine) diterapkan untuk meningkatkan akurasi:
+1. **PaddleOCR**: Merupakan framework OCR berbasis *deep learning* (kecerdasan buatan) yang efisien dan mendukung pengenalan karakter multi-bahasa dengan sangat akurat. PaddleOCR unggul dalam mendeteksi dan mengekstraksi teks pada gambar dengan struktur yang kompleks dan presisi tinggi, seperti pada dokumen teknis (*manual book*) berbahasa Inggris maupun format yang memiliki banyak tata letak.
+2. **Tesseract OCR**: Mesin OCR sumber terbuka yang dikembangkan oleh Google. Tesseract banyak digunakan untuk mengenali teks pada dokumen pindaian standar dan memiliki keandalan yang baik, terutama disesuaikan untuk dokumen berbahasa Indonesia. Penggunaan kombinasi mesin OCR ini memastikan ekstraksi teks yang adaptif terhadap berbagai jenis bahasa dan gaya font dokumen.
+
+## 2.2 *Document Layout Analysis* (DLA)
+*Document Layout Analysis* (DLA) adalah proses mengidentifikasi dan mengkategorikan wilayah perhatian (*regions of interest*) pada suatu citra dokumen, seperti paragraf teks, judul, gambar, tabel, dan margin. Analisis tata letak sangat penting dalam memproses buku panduan teknis yang sering kali menggunakan tata letak multi-kolom dan banyak mengandung tabel atau gambar.
+Untuk mengatasi tantangan ini, proyek ini mengintegrasikan **Surya AI** untuk deteksi visual tata letak. Surya AI mampu mengenali batasan tabel, membedakan kolom teks secara spasial, serta mendeteksi posisi gambar. Sistem membagi dokumen multi-kolom (*multi-column splitting*) menjadi segmen-segmen gambar tunggal agar lebih mudah dibaca pada pratinjau (*preview*) antarmuka dan mencegah algoritma teks mengekstraksi kalimat secara berantakan lintas kolom.
+
+## 2.3 Pemrosesan Dokumen Hibrida (*Hybrid Document Processing*)
+Dalam manajemen dokumen elektronik modern, pemrosesan dokumen secara tunggal tidak selalu memberikan hasil yang maksimal. **Pemrosesan Dokumen Hibrida** adalah arsitektur yang menggabungkan kemampuan membaca teks *native* (bawaan digital) dari dokumen PDF (dengan alat seperti `PyPDF2` atau `pdfplumber`) dan file Microsoft Word (DOCX) melalui ekstraksi tekstual langsung, tanpa melakukan *render* visual penuh jika tidak diperlukan. 
+Metode ini memastikan **tidak ada data yang hilang** (100% *content coverage*). Teks digital langsung diekstraksi untuk meminimalkan beban pemrosesan OCR. Namun, jika dalam dokumen tersebut terdeteksi struktur kompleks, seperti tabel dalam bentuk gambar atau halaman pindaian, sistem secara cerdas melakukan *routing* untuk menggunakan ekstraksi visual via OCR.
+
+## 2.4 *Artificial Intelligence* (AI) dalam Klasifikasi dan Ekstraksi Spesifik
+Penerapan *Artificial Intelligence*, khususnya model bahasa besar (*Large Language Models* / LLM) digunakan secara luas untuk pemrosesan bahasa alami (NLP) tahap lanjut pada dokumen. Setelah teks diekstraksi, AI ditugaskan untuk tugas-tugas analisis kompleks:
+- **Klasifikasi Dokumen**: AI digunakan untuk mengkategorikan isi buku panduan ke dalam struktur laporan yang relevan secara otomatis. Untuk memastikan akurasi, proyek ini juga menerapkan prinsip *Human-in-the-Loop* (HITL), di mana pengguna dapat meninjau, mengesampingkan (*override*), atau mengonfirmasi klasifikasi AI jika metrik keyakinan (*confidence level*) rendah.
+- **Ekstraksi Informasi Berharga**: Penggunaan *prompting* tingkat lanjut terhadap AI memungkinkan ekstraksi data terstruktur, seperti informasi di halaman sampul (*cover page*), nomor seri produk, atau identifikasi peringatan, sekaligus mengabaikan teks-teks boilerplate atau *legal notice* yang tidak terlalu penting.
+
+## 2.5 Arsitektur *Backend* (*FastAPI* dan Python)
+*Backend* sistem dikembangkan menggunakan **FastAPI**, kerangka kerja web modern berkinerja tinggi untuk membangun API menggunakan Python. FastAPI dipilih karena mendukung pemrosesan asinkron (berbasis ASGI), yang sangat penting untuk melayani pemrosesan tugas berat seperti memuat model *machine learning* ke memori (VRAM/CUDA), menjalankan algoritma ekstraksi tabel, serta melakukan *rendering* citra secara simultan tanpa memblokir permintaan pengguna lainnya. Ekosistem Python (termasuk *pandas*, *numpy*, *OpenCV*, dan pustaka pemrosesan data lainnya) memfasilitasi algoritma *pipeline* manipulasi gambar dan teks secara kokoh.
+
+## 2.6 Arsitektur *Frontend* (*Flutter* untuk UI)
+Untuk menyajikan antarmuka yang dinamis, interaktif, dan responsif bagi pengguna, **Flutter** (sebuah kerangka kerja *UI toolkit* dari Google) digunakan. Flutter memungkinkan kompilasi tunggal (*cross-platform*) ke berbagai perangkat termasuk aplikasi *desktop* Windows dan antarmuka web. Fitur utama yang dikembangkan di *frontend* melibatkan pratinjau dokumen (berbasis *widget* dinamis yang me-render potongan segmen *multi-column* secara halus) dan interaksi pengguna yang menjembatani hasil analisis backend (*layout analysis*) secara visual ke pengguna.

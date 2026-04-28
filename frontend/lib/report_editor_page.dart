@@ -9,12 +9,16 @@ class ReportEditorPage extends StatefulWidget {
   final List<dynamic> items;
   final String originalFilename;
   final String language; // 'id' or 'en'
+  final String? aiProductName;
+  final String? aiProductDesc;
 
   const ReportEditorPage({
     super.key,
     required this.items,
     required this.originalFilename,
     this.language = 'id',
+    this.aiProductName,
+    this.aiProductDesc,
   });
 
   @override
@@ -84,6 +88,14 @@ class _ReportEditorPageState extends State<ReportEditorPage> {
           if (m['highlights'] == null) m['highlights'] = [];
           return m;
         }));
+    
+    // Initialize cover info from AI extraction (if available)
+    if (widget.aiProductName != null && widget.aiProductName!.isNotEmpty) {
+      _customProductName = widget.aiProductName;
+    }
+    if (widget.aiProductDesc != null && widget.aiProductDesc!.isNotEmpty) {
+      _customProductDesc = widget.aiProductDesc;
+    }
   }
 
   @override
