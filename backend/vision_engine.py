@@ -855,11 +855,12 @@ Output ONLY the JSON array, nothing else."""
             # TEXT-ONLY call — no image_base64!
             response = openrouter.call(prompt, timeout=30)
             if not response:
+                logger.warning("AI classification: API returned empty response")
                 return None
 
             json_match = re.search(r'\[.*\]', response, re.DOTALL)
             if not json_match:
-                logger.warning("AI classification: no JSON array found in response")
+                logger.warning(f"AI classification: no JSON array found in response: {response[:100]}...")
                 return None
 
             results = json.loads(json_match.group())
@@ -947,10 +948,9 @@ Output ONLY the JSON array, nothing else."""
         logger.info("📐 Stage 1: Layout detection (Surya)...")
         regions = self._detect_layout(ocr_img)   # Gunakan ocr_img (sudah upscale jika perlu)
 
-        # Scale-down bbox jika gambar di-upscale agar bbox sesuai original_img
-        if ocr_scale != 1.0:
-            for r in regions:
-                r['bbox'] = [int(v / ocr_scale) for v in r['bbox']]
+        # NOTE: We keep regions in UPSCALED coordinates for now 
+        # so they match ocr_img during Stage 2 processing.
+        # We will scale them back to original size at the very end.
 
         # Fallback: if Surya finds nothing, OCR the full page
         if not regions:
@@ -988,10 +988,10 @@ Output ONLY the JSON array, nothing else."""
                     
                     # Direct Translate Region
                     x1, y1, x2, y2 = bbox
-                    pad = 10
+                    pad = int(10 * ocr_scale)
                     px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
-                    px2, py2 = min(w, x2 + pad), min(h, y2 + pad)
-                    crop_visual = original_img[py1:py2, px1:px2]
+                    px2, py2 = min(ocr_img.shape[1], x2 + pad), min(ocr_img.shape[0], y2 + pad)
+                    crop_visual = ocr_img[py1:py2, px1:px2]
                     
                     if crop_visual.size > 0:
                         _, buffer = cv2.imencode('.jpg', crop_visual)
@@ -1055,21 +1055,22 @@ Output ONLY the JSON array, nothing else."""
             for region in regions:
                 if region['type'] in ('heading', 'paragraph'):
                     rx1, ry1, rx2, ry2 = region['bbox']
-                    pad = 5
+                    pad = int(5 * ocr_scale)
                     px1, py1 = max(0, rx1 - pad), max(0, ry1 - pad)
-                    px2, py2 = min(w, rx2 + pad), min(h, ry2 + pad)
+                    px2, py2 = min(ocr_img.shape[1], rx2 + pad), min(ocr_img.shape[0], ry2 + pad)
                     
-                    crop = original_img[py1:py2, px1:px2]
+                    crop = ocr_img[py1:py2, px1:px2]
                     if crop.size > 0:
                         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                         dark_ratio = np.sum(gray < 80) / (crop.shape[0] * crop.shape[1])
                         if dark_ratio > 0.40:
-                            # Invert the region in-place
-                            original_img[py1:py2, px1:px2] = cv2.bitwise_not(crop)
+                            # Invert the region in-place on ocr_img
+                            ocr_img[py1:py2, px1:px2] = cv2.bitwise_not(crop)
                             logger.info(f"🔄 Inverted dark region before OCR: [{rx1},{ry1},{rx2},{ry2}] (dark_ratio={dark_ratio:.2f})")
             
             try:
-                full_page_result = self.ocr_engine.ocr(original_img, cls=False)
+                # ⚠️ BUG FIX: Use ocr_img (upscaled) instead of original_img for better OCR accuracy
+                full_page_result = self.ocr_engine.ocr(ocr_img, cls=False)
 
                 if full_page_result and full_page_result[0]:
                     # Collect all text lines with their positions
@@ -1078,8 +1079,12 @@ Output ONLY the JSON array, nothing else."""
                         points = line[0]
                         text   = clean_text(line[1][0].strip())  # Enforce Latin-only
                         conf   = line[1][1]
-
-                        if not text or conf < 0.30 or len(text) < 2:
+                        
+                        if not text:
+                            continue
+                            
+                        if conf < 0.25 or len(text) < 2:
+                            # logger.debug(f"Skipping noisy OCR line: '{text}' (conf={conf:.2f})")
                             continue
 
                         # Convert polygon to axis-aligned bbox
@@ -1111,7 +1116,7 @@ Output ONLY the JSON array, nothing else."""
                             raw_lines.append({
                                 "text": text,
                                 "bbox": [lx1, ly1, lx2, ly2],
-                                "confidence": round(conf, 2),
+                                "confidence": round(float(conf), 2),
                             })
 
                     # ── Merge adjacent text lines into paragraphs ──
@@ -1376,8 +1381,8 @@ Output ONLY the JSON array, nothing else."""
                 x1, y1, x2, y2 = elem['bbox']
                 pad = 20
                 px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
-                px2, py2 = min(w, x2 + pad), min(h, y2 + pad)
-                crop_visual = original_img[py1:py2, px1:px2]
+                px2, py2 = min(ocr_img.shape[1], x2 + pad), min(ocr_img.shape[0], y2 + pad)
+                crop_visual = ocr_img[py1:py2, px1:px2]
 
                 if crop_visual.size > 0:
                     crop_fname = f"{filename_base}_crop_{elem['type']}_{idx}.png"
@@ -1402,8 +1407,15 @@ Output ONLY the JSON array, nothing else."""
             })
 
         logger.info(f"✅ Hybrid scan complete: {len(final_elements)} elements")
+        # ── Final Cleanup & Scaling ──
+        # Scale everything back to original_img coordinates before returning
+        if ocr_scale != 1.0:
+            for e in final_elements:
+                e['bbox'] = [int(v / ocr_scale) for v in e['bbox']]
+                
         return {
             "elements": final_elements,
+            "preview_url": f"http://127.0.0.1:8000/output/{preview_fname}",
             "clean_image_path": preview_path
         }
 

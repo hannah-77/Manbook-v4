@@ -965,31 +965,7 @@ class _ReportEditorPageState extends State<ReportEditorPage> {
             style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.black),
           ),
         ),
-        const SizedBox(height: 120),
-        // Letterhead from backend
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: Image.network(
-            'http://127.0.0.1:8000/files/letterhead.png',
-            width: double.infinity,
-            fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => Column(
-              children: [
-                Container(
-                  height: 6,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [_primaryBlue, _lightBlue, Color(0xFF06B6D4)],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text('ELITECH TECHNOVISION',
-                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: _primaryBlue, letterSpacing: 1.5)),
-              ],
-            ),
-          ),
-        ),
+
       ],
     );
   }

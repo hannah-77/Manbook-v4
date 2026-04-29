@@ -25,7 +25,7 @@ def _is_watermark(text: str) -> bool:
             return True
     return False
 
-def convert_pdf_to_images_safe(path, dpi=300):
+def convert_pdf_to_images_safe(path, dpi=300, max_pages=None):
     from pdf2image import convert_from_path
     poppler = os.environ.get('POPPLER_PATH')
     if not poppler:
@@ -33,10 +33,17 @@ def convert_pdf_to_images_safe(path, dpi=300):
              if os.path.exists(p):
                  poppler = p
                  break
+    
+    # pdf2image uses first_page and last_page (1-indexed)
+    params = {'dpi': dpi, 'poppler_path': poppler}
+    if max_pages:
+        params['last_page'] = max_pages
+
     try:
-        return convert_from_path(path, dpi=dpi, poppler_path=poppler)
+        return convert_from_path(path, **params)
     except Exception:
-        return convert_from_path(path, dpi=dpi)
+        if 'poppler_path' in params: del params['poppler_path']
+        return convert_from_path(path, **params)
 
 def remove_watermarks_and_enhance(image_cv):
     """

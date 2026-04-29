@@ -780,7 +780,7 @@ def correct_ocr_text_with_highlights(text: str, lang: str = "id") -> dict:
 def correct_text_ai(text: str, lang: str = "id") -> dict:
     """
     Uses Gemini AI (via OpenRouter) to normalize and fix text.
-    Best for Word documents or high-quality OCR where grammar/phrasing matters.
+    STRICT MODE: Only fixes typos and OCR errors. Does NOT add, remove, or rephrase content.
     """
     if not text or len(text.strip()) < 5:
         return {"text": text, "highlights": []}
@@ -791,17 +791,36 @@ def correct_text_ai(text: str, lang: str = "id") -> dict:
         if not client: return {"text": text, "highlights": []}
         
         lang_label = "Indonesian" if lang == "id" else "English"
-        prompt = f"""Normalize and fix this technical manual text found in a {lang_label} document.
-Fix spelling, grammar, and formatting errors while PRESERVING technical terms and product names.
-Return ONLY the corrected text.
+        prompt = f"""Fix ONLY spelling errors and OCR artifacts in this {lang_label} technical manual text.
+
+STRICT RULES:
+- Do NOT add any new words, sentences, or explanations
+- Do NOT remove any existing content
+- Do NOT rephrase or restructure sentences
+- Do NOT add formatting like bullet points or numbering that wasn't there
+- ONLY fix obvious typos and broken characters
+- The output must have approximately the SAME length as the input
+- Return ONLY the corrected text, nothing else
 
 TEXT:
 {text}"""
 
         corrected = client.call(prompt, timeout=15)
         if corrected and len(corrected) > 5:
-            # Simple highlight detection (anything changed)
-            return {"text": corrected.strip(), "highlights": []}
+            corrected = corrected.strip()
+            
+            # LENGTH GUARD: Reject AI output that is significantly longer than input
+            # This prevents the AI from adding content that wasn't in the original
+            input_len = len(text.strip())
+            output_len = len(corrected)
+            if output_len > input_len * 1.3:  # More than 30% longer = AI added content
+                logger.warning(
+                    f"AI correction rejected: output ({output_len} chars) is >30% longer "
+                    f"than input ({input_len} chars). Using original text."
+                )
+                return {"text": text, "highlights": []}
+            
+            return {"text": corrected, "highlights": []}
     except Exception as e:
         logger.warning(f"AI correction failed: {e}")
         

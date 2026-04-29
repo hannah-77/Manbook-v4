@@ -22,7 +22,7 @@ class BioBrain:
     def __init__(self):
         # The 7 Standard Chapters (Fixed Schema)
         self.taxonomy = {
-            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "peringatan", "keamanan", "introduction", "overview"]},
+            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "peringatan", "keamanan", "introduction", "overview", "notice", "precaution", "perhatian", "pencegahan", "danger", "hazard"]},
             "BAB 2": {"title": "Instalasi", "keywords": ["install", "setup", "pasang", "mounting", "connect", "power", "unboxing", "rakit", "assembly"]},
             "BAB 3": {"title": "Panduan Operasional & Pemantauan Klinis", "keywords": ["operation", "operasional", "monitor", "display", "screen", "tombol", "measure", "klinis", "prosedur", "langkah", "cara kerja", "penggunaan"]},
             "BAB 4": {"title": "Perawatan, Pemeliharaan & Pembersihan", "keywords": ["maintenance", "clean", "bersih", "replace", "ganti", "battery", "care", "steril", "disinfeksi"]},
@@ -31,7 +31,7 @@ class BioBrain:
             "BAB 7": {"title": "Garansi & Layanan", "keywords": ["warrant", "garansi", "service", "layanan", "kontak", "distributor", "contact", "support", "permai", "osowilangun", "purna jual"]},
             
             # English Variants
-            "Chapter 1": {"title": "Intended Use & Safety", "keywords": ["purpose", "safety", "intended", "warning", "caution", "danger", "introduction", "overview"]},
+            "Chapter 1": {"title": "Intended Use & Safety", "keywords": ["purpose", "safety", "intended", "warning", "caution", "danger", "introduction", "overview", "notice", "precaution", "hazard"]},
             "Chapter 2": {"title": "Installation", "keywords": ["install", "installation", "setup", "mounting", "connect", "power", "unboxing", "assembly"]},
             "Chapter 3": {"title": "Operation & Clinical Monitoring", "keywords": ["operation", "monitor", "display", "screen", "buttons", "measure", "clinical", "procedure", "usage", "how to use"]},
             "Chapter 4": {"title": "Maintenance, Care & Cleaning", "keywords": ["maintenance", "cleaning", "care", "replace", "battery", "sterilize", "disinfect"]},
@@ -259,7 +259,7 @@ class BioBrain:
         # 2. Hard-Switch Keywords (Priority 2)
         # If these appear in a title/heading, we MUST switch immediately.
         hard_switches = {
-            "BAB 1": [r'\bintended', r'\btujuan', r'\bsafety', r'\bkeamanan', r'\bwarning', r'\bperingatan', r'\bintro'],
+            "BAB 1": [r'\bintended', r'\btujuan', r'\bsafety', r'\bkeamanan', r'\bwarning', r'\bperingatan', r'\bintro', r'\bnotice', r'\bprecaution', r'\bpencegahan', r'\bbahaya', r'\bdanger', r'\bhazard'],
             "BAB 2": [r'\binstall', r'\bpasang', r'\bsetup', r'\bassembly', r'\bmerakit'],
             "BAB 3": [r'\boperation', r'\boperasional', r'\bmonitor', r'\buse', r'\bpenggunaan', r'\binstruksi', r'\bmanual'],
             "BAB 4": [r'\bmaintenance', r'\bperawatan', r'\bpemeliharaan', r'\bclean', r'\bbersih', r'\bsteril'],
@@ -281,6 +281,30 @@ class BioBrain:
                         logger.info(f"📍 Context Switch: Hard-Switch Keyword '{p}' found in heading -> {target_key}")
                         self.current_context = target_key
                         return self.current_context, self.taxonomy[target_key]["title"]
+
+        # 2b. Safety Content Detection (Priority 2b)
+        # WARNING/CAUTION/NOTICE blocks belong in BAB 1 even as paragraphs.
+        # These are standalone safety labels that often appear as bold text blocks,
+        # not inside headings. We check ALL element types, not just title/heading.
+        safety_patterns = [
+            r'^\s*warning\b',        # Starts with "WARNING"
+            r'^\s*caution\b',        # Starts with "CAUTION"
+            r'^\s*danger\b',         # Starts with "DANGER"
+            r'^\s*notice\b',         # Starts with "NOTICE"
+            r'^\s*user\s+notice\b',  # Starts with "USER NOTICE"
+            r'^\s*peringatan\b',     # Starts with "PERINGATAN"
+            r'^\s*perhatian\b',      # Starts with "PERHATIAN"
+            r'^\s*bahaya\b',         # Starts with "BAHAYA"
+            r'^\s*tindakan\s+pencegahan\b',  # Starts with "TINDAKAN PENCEGAHAN"
+        ]
+        for sp in safety_patterns:
+            if re.search(sp, text):
+                target_key = "BAB 1"
+                if self.current_context.startswith("Chapter") and "Chapter 1" in self.taxonomy:
+                    target_key = "Chapter 1"
+                logger.info(f"📍 Safety Content: '{text[:50]}...' -> {target_key}")
+                self.current_context = target_key
+                return self.current_context, self.taxonomy[target_key]["title"]
 
         # 3. Dynamic Keyword Scoring (Priority 3)
         best_match = None

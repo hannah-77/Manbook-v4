@@ -54,21 +54,7 @@ class BioArchitect:
 
     def __init__(self):
         self.base_path = _get_base_path()
-        self.letterhead_path = self._resolve_letterhead()
-
-    def _resolve_letterhead(self):
-        """Cari file letterhead relatif terhadap folder backend."""
-        raw = os.getenv("LETTERHEAD_PATH", "").strip()
-        if not raw:
-            return None
-        # Coba absolut dulu, lalu relatif ke BASE_PATH
-        if os.path.isabs(raw) and os.path.exists(raw):
-            return raw
-        candidate = os.path.join(self.base_path, raw)
-        if os.path.exists(candidate):
-            return candidate
-        logger.warning(f"Letterhead tidak ditemukan: {raw}")
-        return None
+        self.letterhead_path = None
 
     def _resolve_crop_path(self, item):
         """
@@ -198,79 +184,9 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     def _add_header_footer(self, doc, bab_label=""):
         """
-        Header: KOSONG (tidak ada teks)
-        Footer: letterhead.png full-width (gelombang biru + logo Elitech) + nomor halaman
+        Header and Footer dihilangkan sesuai permintaan user.
         """
-        section = doc.sections[0]
-
-        # ── HEADER: Kosongkan ──────────────────────────────────────
-        section.different_first_page_header_footer = True
-        header = section.header
-        header.is_linked_to_previous = False
-
-        if not header.paragraphs:
-            header.add_paragraph()
-        hp = header.paragraphs[0]
-        hp.clear()
-        # Header dibiarkan kosong sesuai permintaan user
-
-        # ── FOOTER ──────────────────────────────────────────
-        footer = section.footer
-        footer.is_linked_to_previous = False
-
-        if not footer.paragraphs:
-            footer.add_paragraph()
-        fp = footer.paragraphs[0]
-        fp.clear()
-        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp.paragraph_format.space_before = Pt(0)
-        fp.paragraph_format.space_after = Pt(0)
-
-        # Tambahkan nomor halaman di atas letterhead
-        run_pg = fp.add_run()
-        run_pg.font.name  = 'Arial'
-        run_pg.font.size  = Pt(9)
-        run_pg.font.color.rgb = self.COLOR_PRIMARY
-        run_pg.font.bold  = True
-
-        fldChar1 = OxmlElement('w:fldChar')
-        fldChar1.set(qn('w:fldCharType'), 'begin')
-        instrText = OxmlElement('w:instrText')
-        instrText.text = ' PAGE '
-        fldChar2 = OxmlElement('w:fldChar')
-        fldChar2.set(qn('w:fldCharType'), 'end')
-        run_pg._r.extend([fldChar1, instrText, fldChar2])
-
-        # Letterhead image (hanya bagian gelombang + logo) di bawah nomor halaman
-        if self.letterhead_path:
-            try:
-                from PIL import Image as PILImage
-                import io
-
-                # Crop hanya 10% bawah agar tidak terlalu tinggi (mencegah footer naik ke tengah halaman)
-                img = PILImage.open(self.letterhead_path)
-                img_w, img_h = img.size
-                crop_top = int(img_h * 0.92)  # Ambil 8% terbawah saja
-                cropped = img.crop((0, crop_top, img_w, img_h))
-
-                img_buffer = io.BytesIO()
-                cropped.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-
-                fp_img = footer.add_paragraph()
-                fp_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                fp_img.paragraph_format.space_before = Pt(2)
-                fp_img.paragraph_format.space_after = Pt(0)
-                run_logo = fp_img.add_run()
-                run_logo.add_picture(img_buffer, width=Inches(6.5))
-            except Exception as e:
-                logger.warning(f"Gagal load letterhead di footer: {e}")
-                fp.add_run("\n© Elitech Technovision").font.size = Pt(8)
-        else:
-            run_co = fp.add_run("\n© Elitech Technovision")
-            run_co.font.name  = 'Arial'
-            run_co.font.size  = Pt(8)
-            run_co.font.color.rgb = self.COLOR_GRAY
+        pass
 
     # ─────────────────────────────────────────────
     # Cover Page
@@ -338,44 +254,6 @@ class BioArchitect:
         rbm.font.size  = Pt(44)
         rbm.font.bold  = True
         rbm.font.color.rgb = self.COLOR_BLACK
-
-        # ── Bawah: Letterhead (hanya bagian gelombang + logo) ──────
-        if self.letterhead_path:
-            try:
-                from PIL import Image as PILImage
-                import io
-
-                # Buka gambar letterhead dan crop hanya bagian bawah (gelombang + logo)
-                img = PILImage.open(self.letterhead_path)
-                img_w, img_h = img.size
-                
-                # Ambil 30% bawah gambar (area gelombang biru + logo Elitech)
-                crop_top = int(img_h * 0.70)
-                cropped = img.crop((0, crop_top, img_w, img_h))
-                
-                # Simpan ke buffer memory (tidak perlu file sementara)
-                img_buffer = io.BytesIO()
-                cropped.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-
-                p_logo = doc.add_paragraph()
-                p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_logo.paragraph_format.space_before = Pt(20)
-                p_logo.paragraph_format.space_after  = Pt(0)
-                p_logo.paragraph_format.first_line_indent = Pt(0)
-
-                # Negatif marjin kiri/kanan agar full-width
-                p_logo.paragraph_format.left_indent  = Cm(-3.0)
-                p_logo.paragraph_format.right_indent = Cm(-2.0)
-
-                p_logo.add_run().add_picture(
-                    img_buffer,
-                    width=Cm(21)   # lebar penuh A4
-                )
-            except Exception as e:
-                logger.warning(f"Cover letterhead error: {e}")
-                p_fb = doc.add_paragraph("[ Letterhead gagal dimuat ]")
-                p_fb.paragraph_format.first_line_indent = Pt(0)
 
         doc.add_page_break()
 
@@ -845,12 +723,28 @@ class BioArchitect:
         doc.save(word_path)
         logger.info(f"✓ Word file saved: {word_filename}")
 
-        # ── Konversi ke PDF ──────────────────────────────────────
+        # ── Konversi ke PDF (SILENT — tidak membuka Word secara visible) ──
         pdf_filename = f"{safe_name}.pdf"
         pdf_path = os.path.join(self.base_path, pdf_filename)
         try:
-            from docx2pdf import convert
-            convert(word_path, pdf_path)
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            
+            abs_word_path = os.path.abspath(word_path)
+            abs_pdf_path = os.path.abspath(pdf_path)
+            
+            word_app = win32com.client.DispatchEx("Word.Application")
+            word_app.Visible = False
+            word_app.DisplayAlerts = False
+            try:
+                doc_com = word_app.Documents.Open(abs_word_path, ReadOnly=True)
+                doc_com.SaveAs2(abs_pdf_path, FileFormat=17)  # 17 = wdFormatPDF
+                doc_com.Close(SaveChanges=False)
+            finally:
+                word_app.Quit()
+                del word_app
+            
             logger.info(f"✓ PDF file saved: {pdf_filename}")
         except Exception as e:
             logger.warning(f"⚠️ PDF conversion failed: {e}")

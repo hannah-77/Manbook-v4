@@ -789,3 +789,144 @@ def _bbox_overlap(bbox1, bbox2, threshold=0.5) -> bool:
     area1 = max((bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1]), 1)
     
     return overlap_area / area1 > threshold
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. DOCX VISUAL CROP — Crop tables/figures from rendered PDF
+# ═══════════════════════════════════════════════════════════════
+
+def crop_visual_elements_from_pdf(pdf_path: str, structured_data: list, session_id: str) -> int:
+    """
+    After DOCX → PDF conversion, crop table and figure regions from rendered pages.
+    Updates structured_data items IN-PLACE with crop_url and crop_local paths.
+
+    This operates at the ELEMENT level (individual tables/figures) and does NOT
+    affect page-level column splitting or preview generation in any way.
+
+    Returns the number of elements that received a visual crop.
+    """
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(backend_dir, "output_results")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Find elements that need visual crops (no crop_local yet)
+    uncropped_tables = [(i, item) for i, item in enumerate(structured_data)
+                        if item.get('type') == 'table' and not item.get('crop_local')]
+    uncropped_figures = [(i, item) for i, item in enumerate(structured_data)
+                         if item.get('type') == 'figure' and not item.get('crop_local')]
+
+    if not uncropped_tables and not uncropped_figures:
+        logger.info("✓ All visual elements already have crops — skipping DOCX crop")
+        return 0
+
+    logger.info(
+        f"📸 DOCX Visual Crop: {len(uncropped_tables)} tables + "
+        f"{len(uncropped_figures)} figures need crops..."
+    )
+
+    crop_count = 0
+    table_crops = []
+    figure_crops = []
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_idx, page in enumerate(pdf.pages):
+                # Render at high resolution for clean visual crops
+                render = page.to_image(resolution=200)
+                img_cv = cv2.cvtColor(np.array(render.original), cv2.COLOR_RGB2BGR)
+                ch, cw = img_cv.shape[:2]
+
+                scale_x = cw / page.width
+                scale_y = ch / page.height
+
+                # ── Detect and crop TABLES ──
+                try:
+                    found_tables = page.find_tables({
+                        "vertical_strategy": "lines",
+                        "horizontal_strategy": "lines"
+                    })
+                    # Fallback: text-aligned tables (no visible borders)
+                    if not found_tables:
+                        found_tables = page.find_tables({
+                            "vertical_strategy": "text",
+                            "horizontal_strategy": "text"
+                        })
+
+                    for t_idx, table_obj in enumerate(found_tables):
+                        bbox = table_obj.bbox  # (x0, top, x1, bottom) PDF units
+                        pad = 10
+                        px1 = max(0, int(bbox[0] * scale_x) - pad)
+                        py1 = max(0, int(bbox[1] * scale_y) - pad)
+                        px2 = min(cw, int(bbox[2] * scale_x) + pad)
+                        py2 = min(ch, int(bbox[3] * scale_y) + pad)
+
+                        if (px2 - px1) < 30 or (py2 - py1) < 20:
+                            continue
+
+                        crop_visual = img_cv[py1:py2, px1:px2]
+                        if crop_visual.size > 0:
+                            crop_fname = f"DOCX_TBL_{session_id}_p{page_idx}_t{t_idx}.png"
+                            crop_path = os.path.join(output_dir, crop_fname)
+                            cv2.imwrite(crop_path, crop_visual)
+
+                            from urllib.parse import quote
+                            crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                            table_crops.append({"crop_path": crop_path, "crop_url": crop_url})
+                            logger.info(f"  📊 Table crop: p{page_idx}_t{t_idx} ({px2-px1}x{py2-py1}px)")
+                except Exception as e_tbl:
+                    logger.warning(f"Table detection on page {page_idx}: {e_tbl}")
+
+                # ── Detect and crop FIGURES (embedded images in PDF) ──
+                try:
+                    if hasattr(page, 'images') and page.images:
+                        for f_idx, img_info in enumerate(page.images):
+                            ix0, iy0 = img_info.get('x0', 0), img_info.get('top', 0)
+                            ix1, iy1 = img_info.get('x1', 0), img_info.get('bottom', 0)
+
+                            if (ix1 - ix0) < 30 or (iy1 - iy0) < 30:
+                                continue  # Skip tiny icons/bullets
+
+                            pad = 5
+                            px1 = max(0, int(ix0 * scale_x) - pad)
+                            py1 = max(0, int(iy0 * scale_y) - pad)
+                            px2 = min(cw, int(ix1 * scale_x) + pad)
+                            py2 = min(ch, int(iy1 * scale_y) + pad)
+
+                            crop_visual = img_cv[py1:py2, px1:px2]
+                            if crop_visual.size > 0:
+                                crop_fname = f"DOCX_FIG_{session_id}_p{page_idx}_f{f_idx}.png"
+                                crop_path = os.path.join(output_dir, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+
+                                from urllib.parse import quote
+                                crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                                figure_crops.append({"crop_path": crop_path, "crop_url": crop_url})
+                                logger.info(f"  🖼️ Figure crop: p{page_idx}_f{f_idx} ({px2-px1}x{py2-py1}px)")
+                except Exception as e_fig:
+                    logger.warning(f"Figure detection on page {page_idx}: {e_fig}")
+
+        # ── Assign crops to uncropped elements (in document order) ──
+        t_idx = 0
+        for _, item in uncropped_tables:
+            if t_idx < len(table_crops):
+                item['crop_local'] = table_crops[t_idx]['crop_path']
+                item['crop_url'] = table_crops[t_idx]['crop_url']
+                crop_count += 1
+                t_idx += 1
+
+        f_idx = 0
+        for _, item in uncropped_figures:
+            if f_idx < len(figure_crops):
+                item['crop_local'] = figure_crops[f_idx]['crop_path']
+                item['crop_url'] = figure_crops[f_idx]['crop_url']
+                crop_count += 1
+                f_idx += 1
+
+    except Exception as e:
+        logger.warning(f"DOCX visual crop pipeline error: {e}")
+
+    logger.info(
+        f"✅ DOCX Visual Crop Complete: {crop_count} elements "
+        f"({len(table_crops)} tables, {len(figure_crops)} figures)"
+    )
+    return crop_count
