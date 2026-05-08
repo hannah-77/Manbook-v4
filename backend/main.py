@@ -213,10 +213,11 @@ async def get_progress(session_id: str):
     return {"error": "Session not found"}
 
 @app.post("/process")
-async def process_workflow(request: Request, file: UploadFile = File(...)):
+def process_workflow(request: Request, file: UploadFile = File(...)):
     session_id = request.headers.get("X-Session-Id") or str(uuid.uuid4())
     doc_language = request.headers.get("X-Language", "id")
     direct_translate = request.headers.get("X-Direct-Translate", "false") == "true"
+    single_column_mode = request.headers.get("X-Single-Column", "false") == "true"
 
     logger.info(f"🚀 Processing: {file.filename} (Lang: {doc_language})")
     
@@ -225,13 +226,52 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    if session_id not in progress_tracker:
-        progress_tracker[session_id] = {"status": "starting", "percentage": 0}
+    if session_id in progress_tracker:
+        progress_tracker[session_id].update({"status": "starting", "percentage": 2, "message": "Memulai pemrosesan..."})
+    else:
+        progress_tracker[session_id] = {"status": "starting", "percentage": 2, "current_page": 0, "total_pages": 0, "message": "Memulai pemrosesan..."}
 
     try:
         fname_lower = file.filename.lower()
         structured_data = []
         clean_pages_urls = []
+        
+        # ─── PATH 0: Convert .doc → .docx (Legacy Word Format) ──
+        if fname_lower.endswith('.doc') and not fname_lower.endswith('.docx'):
+            logger.info(f"📄 Converting .doc to .docx: {file.filename}")
+            progress_tracker[session_id].update({"percentage": 3, "message": "Mengkonversi format .doc ke .docx..."})
+            try:
+                import pythoncom
+                import win32com.client
+                
+                pythoncom.CoInitialize()
+                abs_doc = os.path.abspath(temp_path)
+                abs_docx = abs_doc + "x"  # .doc → .docx
+                
+                word_app = win32com.client.DispatchEx("Word.Application")
+                word_app.Visible = False
+                word_app.DisplayAlerts = False
+                try:
+                    doc_com = word_app.Documents.Open(abs_doc, ReadOnly=True)
+                    doc_com.SaveAs2(abs_docx, FileFormat=16)  # 16 = wdFormatXMLDocument (.docx)
+                    doc_com.Close(SaveChanges=False)
+                finally:
+                    word_app.Quit()
+                    del word_app
+                
+                if os.path.exists(abs_docx):
+                    # Replace temp_path and fname with the converted file
+                    old_temp = temp_path
+                    temp_path = abs_docx
+                    fname_lower = fname_lower + "x"  # .doc → .docx
+                    logger.info(f"✅ .doc converted to .docx successfully")
+                    try: os.remove(old_temp)
+                    except: pass
+                else:
+                    logger.error(f"❌ .doc conversion failed - output file not created")
+            except Exception as e_conv:
+                logger.error(f"❌ .doc to .docx conversion failed: {e_conv}")
+                # Will fall through to OCR pipeline as a last resort
         
         # ─── PATH 1: DOCX Direct ─────────────────
         if fname_lower.endswith('.docx') and DIRECT_READER_AVAILABLE:
@@ -239,14 +279,22 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 elements = extract_docx_direct(temp_path, lang=doc_language)
                 if elements:
                     logger.info("⚡ Using DOCX Direct Extraction + AI Normalization")
+                    progress_tracker[session_id].update({"status": "processing", "percentage": 10, "message": "Mengekstrak konten DOCX...", "total_pages": 1})
                     
                     # AI-Corrected Normalization for Word Docs
                     from text_corrector import correct_text_ai
                     
-                    for elem in elements:
+                    total_elems = len(elements)
+                    for ei, elem in enumerate(elements):
+                        # Granular progress: 10% → 70% across elements
+                        elem_pct = 10 + int((ei / max(total_elems, 1)) * 60)
+                        if ei % 5 == 0:  # Update every 5 elements to avoid flooding
+                            progress_tracker[session_id].update({"percentage": elem_pct, "message": f"Normalisasi elemen {ei+1}/{total_elems}..."})
                         # Use Gemini for Word docs normalization instead of simple OCR rules
                         item = orchestrator._normalize_element(elem, doc_language, direct_translate, correct_text_ai)
                         structured_data.append(item)
+                    
+                    progress_tracker[session_id].update({"percentage": 72, "message": "Membuat preview layout DOCX..."})
                     
                     # ── Layout Preview for DOCX (Convert to Images) ──
                     try:
@@ -295,9 +343,14 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                                 full_img_path = os.path.join(OUTPUT_DIR, full_img_fname)
                                 img.save(full_img_path, "JPEG", quality=95)
                                 
-                                # Split into columns
+                                # Split into columns if not in single column mode
                                 try:
-                                    col_paths = split_columns_simple(full_img_path, f"DOCX_{session_id}_{idx}", OUTPUT_DIR)
+                                    if single_column_mode:
+                                        logger.info("Single column mode enabled, skipping split_columns_simple for DOCX preview")
+                                        col_paths = [full_img_path]
+                                    else:
+                                        col_paths = split_columns_simple(full_img_path, f"DOCX_{session_id}_{idx}", OUTPUT_DIR)
+                                        
                                     logger.info(f"📐 DOCX Preview Page {idx}: split_columns returned {len(col_paths)} paths")
                                     if len(col_paths) > 1:
                                         for col_path in col_paths:
@@ -325,7 +378,7 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                                 if elem.get('type') == 'figure' and elem.get('crop_url'):
                                     clean_pages_urls.append(elem['crop_url'])
                         
-                    progress_tracker[session_id].update({"status": "processing", "percentage": 80})
+                    progress_tracker[session_id].update({"status": "processing", "percentage": 85, "message": "Selesai ekstraksi DOCX."})
             except Exception as e:
                 logger.warning(f"DOCX Direct Read failed, falling back: {e}")
 
@@ -335,12 +388,17 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             if pdf_info['is_text_based'] and VISION_ENGINE_AVAILABLE:
                 try:
                     logger.info("⚡ Using Hybrid Direct Pipeline (Surya Layout + PDF Text)")
-                    structured_data, clean_pages_urls = await orchestrator.run_hybrid_direct_pipeline(
+                    structured_data, clean_pages_urls = orchestrator.run_hybrid_direct_pipeline(
                         temp_path, file.filename, session_id, doc_language, direct_translate, 
-                        _ocr_correct_hl if TEXT_CORRECTOR_AVAILABLE else None
+                        _ocr_correct_hl if TEXT_CORRECTOR_AVAILABLE else None,
+                        single_column_mode=single_column_mode
                     )
                 except Exception as e:
+                    import traceback
                     logger.warning(f"Hybrid Direct Pipeline failed, falling back: {e}")
+                    logger.warning(f"Traceback:\n{traceback.format_exc()}")
+                    print(f"\n  ⚠️  Hybrid Pipeline FAILED: {e}")
+                    print(f"  ⚠️  Full traceback:\n{traceback.format_exc()}")
 
         # ─── PATH 3: OCR Pipeline (Scanned) ───────
         if not structured_data:
@@ -351,16 +409,18 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
             else:
                 images = [temp_path]
             
-            structured_data, clean_pages_urls = await orchestrator.run_ocr_pipeline(
+            structured_data, clean_pages_urls = orchestrator.run_ocr_pipeline(
                 images, file.filename, session_id, doc_language, direct_translate, 
-                _ocr_correct_hl if TEXT_CORRECTOR_AVAILABLE else None
+                _ocr_correct_hl if TEXT_CORRECTOR_AVAILABLE else None,
+                single_column_mode=single_column_mode
             )
 
         # ─── Cover Analysis ────────────────────────
+        progress_tracker[session_id].update({"status": "analyzing", "percentage": 96, "message": "Menganalisis sampul dokumen..."})
         ai_prod_name, ai_prod_desc = orchestrator.extract_cover_info(clean_pages_urls, doc_language)
         
         # ─── Build Report ──────────────────────────
-        progress_tracker[session_id].update({"status": "building", "percentage": 90, "message": "Building DOCX..."})
+        progress_tracker[session_id].update({"status": "building", "percentage": 98, "message": "Menyusun laporan DOCX..."})
         result = architect_module.build_report(
             structured_data, file.filename, lang=doc_language,
             custom_product_name=ai_prod_name,
@@ -584,7 +644,7 @@ def _detect_lang_from_text(text: str, filename: str = "") -> dict:
     # Note: 'id' and 'ind' are too common in technical text (ID number, Index)
     # We look for specific language tag patterns
     if re.search(r'[-_. ](eng|en|english|uk|us)[-_. ]', "." + text_lower + "."): en_score += 15
-    if re.search(r'[-_. ](idn|indo|indonesia|bahasa)[-_. ]', "." + text_lower + "."): id_score += 15
+    if re.search(r'[-_. ](ind|idn|indo|indonesia|bahasa)[-_. ]', "." + text_lower + "."): id_score += 15
     
     # ── 2. Technical Manual Keywords ──
     en_tech = ['specification', 'warning', 'safety', 'installation', 'operating', 'troubleshooting', 'warranty', 'chapter', 'contents']
@@ -624,7 +684,7 @@ def _detect_lang_from_text(text: str, filename: str = "") -> dict:
 async def detect_language(file: UploadFile = File(...)):
     """
     Detect document language (Indonesian vs English).
-    Uses weighted scoring of content and metadata.
+    Priority: Filename indicator → Text analysis → AI Vision fallback.
     """
     file_uuid = uuid.uuid4().hex[:8]
     temp_path = os.path.join(TEMP_DIR, f"_lang_det_{file_uuid}_{file.filename}")
@@ -633,10 +693,48 @@ async def detect_language(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         
-        sample_text = ""
-        ext = file.filename.lower()
+        filename_lower = file.filename.lower()
+        ext = filename_lower
         
-        # Quick text extraction for sampling
+        # ═══════════════════════════════════════════════════════════
+        # STEP 0: FILENAME INDICATOR — INSTANT RETURN (Highest Priority)
+        # If "eng"/"en"/"english" or "ind"/"idn"/"indo" is in the
+        # filename as a distinct part, we trust it immediately.
+        # ═══════════════════════════════════════════════════════════
+        fn_check = "." + filename_lower.replace("_", ".").replace("-", ".").replace(" ", ".") + "."
+        
+        # Pattern 1: Separated indicators (eng, en, ind, idn as separate parts)
+        en_indicator = bool(re.search(r'\.(eng|en|english|uk|us)\.', fn_check))
+        id_indicator = bool(re.search(r'\.(ind|idn|indo|indonesia|id)\.', fn_check))
+        
+        # Pattern 2: Concatenated indicators (MBENG, MBIND, MBeng, MBind)
+        # Common pattern: "MB" + language code (Manual Book + ENG/IND)
+        if not en_indicator:
+            en_indicator = bool(re.search(r'mb\s*eng|mbeng', filename_lower))
+        if not id_indicator:
+            id_indicator = bool(re.search(r'mb\s*ind|mbind|mb\s*idn|mbidn', filename_lower))
+        
+        if en_indicator and not id_indicator:
+            logger.info(f"🏷️ Filename indicator: ENGLISH detected in '{file.filename}'")
+            return {
+                "detected": "en", "label": "English",
+                "confidence": 0.99, "confidence_label": "Filename Indicator",
+                "ai_detected": False
+            }
+        if id_indicator and not en_indicator:
+            logger.info(f"🏷️ Filename indicator: INDONESIAN detected in '{file.filename}'")
+            return {
+                "detected": "id", "label": "Bahasa Indonesia",
+                "confidence": 0.99, "confidence_label": "Filename Indicator",
+                "ai_detected": False
+            }
+        # If both match (unlikely) or neither matches, continue to content analysis
+        has_any_indicator = en_indicator or id_indicator
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: EXTRACT SAMPLE TEXT for content analysis
+        # ═══════════════════════════════════════════════════════════
+        sample_text = ""
         if ext.endswith('.pdf'):
             try:
                 with open(temp_path, 'rb') as f:
@@ -653,77 +751,90 @@ async def detect_language(file: UploadFile = File(...)):
             
         sample_text = sample_text.strip()
         
-        # ── 0. Check for Language Indicators in Filename ──
-        filename_lower = file.filename.lower()
-        # Regex to find indicators (en, eng, id, ind, idn) as separate parts of the filename
-        has_indicator = bool(re.search(r'[-_. ](en|eng|english|id|ind|idn|indo|indonesia)[-_. ]', "." + filename_lower + "."))
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: TEXT CONTENT ANALYSIS (if we have readable text)
+        # ═══════════════════════════════════════════════════════════
+        if sample_text and len(sample_text) >= 30:
+            text_result = _detect_lang_from_text(sample_text, filename=file.filename)
+            detected = text_result["lang"]
+            confidence = text_result["conf"]
+            max_score = max(text_result.get("en_score", 0), text_result.get("id_score", 0))
+            
+            # If we got a strong result from text, return it
+            if confidence >= 0.85:
+                label = "Bahasa Indonesia" if detected == 'id' else "English"
+                logger.info(f"📊 Text Analysis Result: {detected} ({label}) conf={confidence}")
+                return {
+                    "detected": detected, "label": label,
+                    "confidence": confidence, "confidence_label": "Text Analysis",
+                    "ai_detected": False
+                }
         
-        # 1. ── AI Vision Path (Primary for Unlabeled or Scanned Files) ──
-        # If no indicator in filename, we FORCE AI Vision immediately.
-        if not has_indicator:
-            logger.info(f"🧠 AI Vision: No indicator in '{file.filename}'. Bypassing manual detection...")
-            try:
-                from openrouter_client import get_openrouter_client
-                import base64
-                client = get_openrouter_client()
-                
-                img_path_or_obj = None
-                if ext.endswith('.pdf'):
-                    from image_processing import convert_pdf_to_images_safe
-                    images = convert_pdf_to_images_safe(temp_path, max_pages=1)
-                    if images: img_path_or_obj = images[0]
-                elif ext in ('.png', '.jpg', '.jpeg'):
-                    import cv2
-                    img_path_or_obj = cv2.imread(temp_path)
-                
-                if img_path_or_obj is not None:
-                    if hasattr(img_path_or_obj, 'save'): # PIL
-                        import io
-                        buffered = io.BytesIO()
-                        img_path_or_obj.save(buffered, format="JPEG", quality=80)
-                        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                    else: # CV2
-                        import cv2
-                        _, buffer = cv2.imencode('.jpg', img_path_or_obj, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                        img_b64 = base64.b64encode(buffer).decode('utf-8')
-                        
-                    prompt = "Identify the language of this document. Return ONLY one word: 'English' or 'Indonesian'."
+        # ═══════════════════════════════════════════════════════════
+        # STEP 3: AI VISION FALLBACK (for scanned docs or weak text)
+        # ═══════════════════════════════════════════════════════════
+        logger.info(f"🧠 AI Vision: No strong signal from filename/text for '{file.filename}'. Using AI...")
+        try:
+            from openrouter_client import get_openrouter_client
+            client = get_openrouter_client()
+            
+            img_path_or_obj = None
+            if ext.endswith('.pdf'):
+                images = convert_pdf_to_images_safe(temp_path, max_pages=1)
+                if images: img_path_or_obj = images[0]
+            elif ext.endswith(('.png', '.jpg', '.jpeg')):
+                img_path_or_obj = cv2.imread(temp_path)
+            
+            if img_path_or_obj is not None:
+                if hasattr(img_path_or_obj, 'save'):  # PIL
+                    import io
+                    buffered = io.BytesIO()
+                    img_path_or_obj.save(buffered, format="JPEG", quality=80)
+                    img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                else:  # CV2
+                    _, buffer = cv2.imencode('.jpg', img_path_or_obj, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    img_b64 = base64.b64encode(buffer).decode('utf-8')
                     
-                    old_model = client.model
-                    old_provider = client.provider
-                    try:
-                        client.model = os.getenv("AI_VISION_MODEL", "openai/gpt-4o-mini")
-                        client.provider = "" 
-                        res = client.call(prompt, image_base64=img_b64, timeout=45)
-                        if res:
-                            res_clean = res.strip().lower()
-                            detected = 'id' if ('indonesia' in res_clean or 'id' in res_clean) else 'en'
-                            label = "Bahasa Indonesia" if detected == 'id' else "English"
-                            logger.info(f"✅ AI Vision Result: {detected} ({label})")
-                            return {"detected": detected, "label": label, "confidence": 0.95, "confidence_label": "AI Vision", "ai_detected": True}
-                    finally:
-                        client.model = old_model
-                        client.provider = old_provider
-            except Exception as e:
-                logger.error(f"AI Vision path failed: {e}")
+                prompt = "Identify the language of this document. Return ONLY one word: 'English' or 'Indonesian'."
+                
+                old_model = client.model
+                old_provider = client.provider
+                try:
+                    client.model = os.getenv("AI_VISION_MODEL", "openai/gpt-4o-mini")
+                    client.provider = "" 
+                    res = client.call(prompt, image_base64=img_b64, timeout=45)
+                    if res:
+                        res_clean = res.strip().lower()
+                        detected = 'id' if ('indonesia' in res_clean) else 'en'
+                        label = "Bahasa Indonesia" if detected == 'id' else "English"
+                        logger.info(f"✅ AI Vision Result: {detected} ({label})")
+                        return {
+                            "detected": detected, "label": label,
+                            "confidence": 0.90, "confidence_label": "AI Vision",
+                            "ai_detected": True
+                        }
+                finally:
+                    client.model = old_model
+                    client.provider = old_provider
+        except Exception as e:
+            logger.error(f"AI Vision path failed: {e}")
 
-        # 2. ── Manual Text-based Detection (Only as fallback or if indicator exists) ──
-        text_result = _detect_lang_from_text(sample_text, filename=file.filename)
-        detected = text_result["lang"]
+        # ═══════════════════════════════════════════════════════════
+        # STEP 4: LAST RESORT — return whatever text analysis gave us
+        # ═══════════════════════════════════════════════════════════
+        if sample_text:
+            text_result = _detect_lang_from_text(sample_text, filename=file.filename)
+            detected = text_result["lang"]
+        else:
+            detected = "id"  # Default to Indonesian
+        
         label = "Bahasa Indonesia" if detected == 'id' else "English"
-        confidence = text_result["conf"]
-        max_score = max(text_result.get("en_score", 0), text_result.get("id_score", 0))
-        
-        # If manual detection is still poor even with indicator, try AI Vision one last time
-        if confidence <= 0.8 or max_score < 20 or len(sample_text) < 50:
-            # (AI logic already tried above if not has_indicator, so this is for cases WITH indicator but poor text)
-            if has_indicator:
-                logger.info(f"🌐 Manual detection poor (conf={confidence}) despite indicator. Using AI Vision fallback...")
-                # ... [same AI logic as above, omitted for brevity but should be included or refactored into a function] ...
-                # For now, to keep it clean, I'll just return the manual result if AI already failed or was skipped
-        
-        logger.info(f"🌐 Final Result: {detected} ({label})")
-        return {"detected": detected, "label": label, "confidence": confidence, "confidence_label": "Text Analysis", "ai_detected": False}
+        logger.info(f"🌐 Fallback Result: {detected} ({label})")
+        return {
+            "detected": detected, "label": label,
+            "confidence": 0.5, "confidence_label": "Fallback",
+            "ai_detected": False
+        }
         
     except Exception as e:
         logger.error(f"Language detection global failure: {e}")
@@ -735,8 +846,119 @@ async def detect_language(file: UploadFile = File(...)):
 
 @app.post("/translate/{session_id}")
 async def translate_session(session_id: str):
-    # This would call orchestrator.translate_session (logic moved there)
-    return {"success": True, "message": "Fitur translasi sedang disinkronkan."}
+    """
+    Translate all items in a session from English → Indonesian using AI.
+    """
+    if session_id not in active_sessions:
+        return {"success": False, "error": "Session not found. Please process a file first."}
+    
+    session = active_sessions[session_id]
+    items = session.get("structured_data", [])
+    original_lang = session.get("doc_language", "en")
+    
+    if not items:
+        return {"success": False, "error": "No data in session to translate."}
+    
+    try:
+        from openrouter_client import get_openrouter_client
+        client = get_openrouter_client()
+        if not client or not client.is_available:
+            return {"success": False, "error": "AI client not configured. Check OPENROUTER_API_KEY in .env"}
+        
+        translated_count = 0
+        total_items = len(items)
+        
+        # Batch translate: group text items and send in chunks for efficiency
+        BATCH_SIZE = 15
+        text_indices = [
+            i for i, item in enumerate(items) 
+            if item.get('type') in ('paragraph', 'heading', 'title', 'list') 
+            and item.get('normalized', '').strip()
+        ]
+        
+        logger.info(f"🌐 Translation: {len(text_indices)} text items to translate (of {total_items} total)")
+        
+        for batch_start in range(0, len(text_indices), BATCH_SIZE):
+            batch_idx = text_indices[batch_start:batch_start + BATCH_SIZE]
+            
+            # Build batch payload
+            texts_to_translate = []
+            for idx in batch_idx:
+                texts_to_translate.append({
+                    "id": idx,
+                    "text": items[idx]['normalized']
+                })
+            
+            prompt = f"""Translate the following technical manual texts from English to Bahasa Indonesia.
+Keep technical terms, product names, model numbers, units (mL, mmHg, °C) in their original form.
+Preserve formatting: bullet points, numbering, line breaks.
+
+INPUT (JSON array):
+{json.dumps(texts_to_translate, ensure_ascii=False)}
+
+Return ONLY a JSON array with the same structure:
+[{{"id": 0, "text": "translated text"}}, ...]
+Do NOT add explanations. Return ONLY the JSON array."""
+            
+            response_text = client.call(prompt, timeout=60)
+            if response_text:
+                # Parse response
+                cleaned = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+                match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+                if match:
+                    try:
+                        translated_batch = json.loads(match.group())
+                        for t_item in translated_batch:
+                            t_id = t_item.get('id')
+                            t_text = t_item.get('text', '')
+                            if t_id is not None and t_text and 0 <= t_id < total_items:
+                                items[t_id]['original'] = items[t_id]['normalized']  # Keep original
+                                items[t_id]['normalized'] = enforce_language(t_text, lang='id')
+                                items[t_id]['lang'] = 'id'
+                                translated_count += 1
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Translation batch parse error: {e}")
+            
+            logger.info(f"   Translated batch {batch_start//BATCH_SIZE + 1}: {len(batch_idx)} items")
+        
+        # Remap chapter IDs from "Chapter X" to "BAB X"
+        for item in items:
+            ch_id = item.get('chapter_id', '')
+            if ch_id.startswith('Chapter '):
+                bab_num = ch_id.replace('Chapter ', '')
+                new_id = f"BAB {bab_num}"
+                item['chapter_id'] = new_id
+                item['chapter_title'] = orchestrator.chapter_titles.get(new_id, item.get('chapter_title', ''))
+        
+        # Rebuild report with translated content
+        result = architect_module.build_report(
+            items, session.get('original_filename', 'translated'),
+            lang='id',
+            custom_product_name=None,
+            custom_product_desc=None
+        )
+        
+        word_url = f"http://127.0.0.1:8000/files/{quote(result['word_file'])}"
+        pdf_url = f"http://127.0.0.1:8000/files/{quote(result['pdf_file'])}" if result.get('pdf_file') else None
+        
+        # Update session
+        session['structured_data'] = items
+        session['doc_language'] = 'id'
+        
+        logger.info(f"✅ Translation complete: {translated_count}/{total_items} items translated")
+        
+        return {
+            "success": True,
+            "results": items,
+            "word_url": word_url,
+            "pdf_url": pdf_url,
+            "translated_count": translated_count,
+            "total_items": total_items
+        }
+        
+    except Exception as e:
+        logger.error(f"Translation Error: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
 
 @app.post("/supplement/{session_id}")
 async def supplement_workflow(session_id: str, files: list[UploadFile] = File(...)):

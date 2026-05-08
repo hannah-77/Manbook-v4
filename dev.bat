@@ -6,7 +6,7 @@ echo.
 
 :: Start Backend with Uvicorn Auto-Reload
 echo [1/2] Starting Backend (Auto-Reload enabled)...
-start "Manbook Backend DEV" cmd /k "cd /d %~dp0backend && call venv311\Scripts\activate && uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
+start "Manbook Backend DEV" cmd /k "cd /d %~dp0backend && venv311\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
 
 timeout /t 3 /nobreak > nul
 

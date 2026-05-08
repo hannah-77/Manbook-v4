@@ -43,6 +43,7 @@ class _ManbookHomeState extends State<ManbookHome> {
   bool _isTranslating = false;
   bool _isTranslated = false;
   bool _directTranslate = false; // Bypass OCR & BioBrain option
+  bool _singleColumnMode = false; // Bypass multi-column split
   
   // AI Cover Info (from backend)
   String _aiProductName = '';
@@ -107,16 +108,48 @@ class _ManbookHomeState extends State<ManbookHome> {
   }
 
   Future<void> _checkBackend() async {
-    // Poll for Health
-    for (int i = 0; i < 10; i++) {
+    // Coba hubungkan ke server backend yang sudah berjalan
+    for (int i = 0; i < 3; i++) {
       try {
-        debugPrint('Checking backend health...');
-        final res = await http.get(Uri.parse('http://127.0.0.1:8000/health'));
-        debugPrint('Backend health status: ${res.statusCode}');
+        final res = await http.get(Uri.parse('http://127.0.0.1:8000/health')).timeout(const Duration(seconds: 2));
         if (res.statusCode == 200) {
-          setState(() {
+          if (mounted) setState(() {
             _isEngineReady = true;
-            _engineStatus = "AI System Ready ✓";
+            _engineStatus = "System Ready ✨";
+          });
+          return;
+        }
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    // Jika server offline, coba jalankan backend secara otomatis
+    if (mounted) setState(() => _engineStatus = "Memulai Backend Engine...");
+    
+    try {
+      // 1. Cek jika berjalan dari compiled release app (data\bin\backend.exe)
+      final exePath = 'data\\bin\\backend.exe';
+      if (await File(exePath).exists()) {
+        _serverProcess = await Process.start(exePath, [], mode: ProcessStartMode.detached);
+      } 
+      // 2. Fallback untuk development (gunakan dev.bat atau start-backend.bat)
+      else if (await File('../backend/start-backend.bat').exists()) {
+        _serverProcess = await Process.start('cmd.exe', ['/c', '..\\backend\\start-backend.bat'], mode: ProcessStartMode.detached);
+      } else if (await File('dev.bat').exists()) {
+        _serverProcess = await Process.start('cmd.exe', ['/c', 'dev.bat'], mode: ProcessStartMode.detached);
+      }
+    } catch (e) {
+      debugPrint("Gagal menjalankan backend otomatis: $e");
+    }
+
+    // Tunggu backend untuk siap (polling lagi hingga 15 detik)
+    for (int i = 0; i < 15; i++) {
+      try {
+        final res = await http.get(Uri.parse('http://127.0.0.1:8000/health')).timeout(const Duration(seconds: 2));
+        if (res.statusCode == 200) {
+          if (mounted) setState(() {
+            _isEngineReady = true;
+            _engineStatus = "System Ready ✨";
           });
           return;
         }
@@ -124,13 +157,12 @@ class _ManbookHomeState extends State<ManbookHome> {
       await Future.delayed(const Duration(seconds: 1));
     }
     
-    setState(() => _engineStatus = "Engine Offline - Please start backend");
+    if (mounted) setState(() => _engineStatus = "Engine Offline ‼️");
   }
 
-  /// Poll backend /progress/{session_id} setiap 1.5 detik sampai selesai.
   Future<void> _pollProgress(String sessionId) async {
     while (_isProcessing) {
-      await Future.delayed(const Duration(milliseconds: 1500));
+      await Future.delayed(const Duration(milliseconds: 800));
       if (!_isProcessing) break;
       try {
         debugPrint('Polling progress for session: $sessionId');
@@ -452,6 +484,7 @@ class _ManbookHomeState extends State<ManbookHome> {
       request.headers['X-Session-Id'] = sessionId;
       request.headers['X-Language'] = _selectedLanguage;
       request.headers['X-Direct-Translate'] = _directTranslate.toString();
+      request.headers['X-Single-Column'] = _singleColumnMode.toString();
       request.files
           .add(await http.MultipartFile.fromPath('file', _selectedFilePath!));
 
@@ -616,6 +649,12 @@ class _ManbookHomeState extends State<ManbookHome> {
                         child: _buildUploadPanel(),
                       ),
                       
+                      // Garis pembatas (lighter line, brighter grey)
+                      Container(
+                        width: 1.5,
+                        color: const Color(0xFFE5E7EB), // Brighter grey (gray-200)
+                      ),
+                      
                       // Right Panel - Results
                       Expanded(
                         flex: 1,
@@ -624,6 +663,9 @@ class _ManbookHomeState extends State<ManbookHome> {
                     ],
                   ),
                 ),
+                
+                // Footer
+                _buildFooter(),
               ],
             ),
           ),
@@ -655,13 +697,49 @@ class _ManbookHomeState extends State<ManbookHome> {
             spacing: 20,
             runSpacing: 15,
             children: [
-              const Text(
-                '📚 Manual Book Data Normalization',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Image.asset(
+                      'assets/elitech_logo.png',
+                      height: 36,
+                      width: 140, // Memanjangkan size logo
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) {
+                        return const Icon(Icons.apartment, color: Color(0xFF1E3A8A), size: 36);
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 25), // Teks digeser
+                  const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ELITECH',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2.0,
+                        ),
+                      ),
+                      Text(
+                        'Manual Book Data Normalization',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
               Container(
                 constraints: BoxConstraints(maxWidth: constraints.maxWidth),
@@ -739,6 +817,68 @@ class _ManbookHomeState extends State<ManbookHome> {
     );
   }
 
+  Widget _buildFooter() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF8FAFC), // Very light gray/blue
+        borderRadius: BorderRadius.only(
+          bottomLeft: Radius.circular(20),
+          bottomRight: Radius.circular(20),
+        ),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            'v4.1.0',
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontWeight: FontWeight.bold,
+              fontSize: 13,
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Powered by ',
+                style: TextStyle(
+                  color: Colors.grey[600],
+                  fontSize: 13,
+                ),
+              ),
+              Text(
+                'RnD Elitech',
+                style: TextStyle(
+                  color: Colors.grey[800],
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(width: 15),
+              Image.asset(
+                'assets/sinko_logo.png', // Logo sinko
+                height: 36,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  return Text(
+                    'SINKO',
+                    style: TextStyle(
+                      color: Colors.grey[800],
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildUploadPanel() {
     return Container(
       color: const Color(0xFFF3F4F6),
@@ -751,18 +891,20 @@ class _ManbookHomeState extends State<ManbookHome> {
                 ? const SizedBox() // while processing, space used by progress below
                 : _selectedFilePath == null
                     ? _buildUploadZone()
-                    : _results.isNotEmpty
+                    : (_results.isNotEmpty || _cleanPages.isNotEmpty)
                         ? _buildPdfPreview()
                         : _buildFileInfo(),
           ),
           
           // Bottom Action Area (Buttons or Progress)
-          const SizedBox(height: 20),
+          if (_isProcessing || _selectedFilePath != null) const SizedBox(height: 20),
           
           if (_isProcessing)
-             SizedBox(
-               height: 300,
-               child: _buildProcessingView()
+             Flexible(
+               child: SizedBox(
+                 height: 300,
+                 child: _buildProcessingView()
+               ),
              )
           else if (_selectedFilePath != null)
             Wrap(
@@ -839,6 +981,36 @@ class _ManbookHomeState extends State<ManbookHome> {
                         activeColor: Colors.orange,
                         onChanged: (val) {
                           setState(() => _directTranslate = val);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                // Single Column Toggle
+                Container(
+                  constraints: const BoxConstraints(maxWidth: 250),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border.all(color: Colors.grey[300]!),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.view_column, color: Colors.indigo, size: 20),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Single Column Mode\n(No Split)', 
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)
+                        ),
+                      ),
+                      Switch(
+                        value: _singleColumnMode,
+                        activeColor: Colors.indigo,
+                        onChanged: (val) {
+                          setState(() => _singleColumnMode = val);
                         },
                       ),
                     ],
@@ -1354,7 +1526,7 @@ class _ManbookHomeState extends State<ManbookHome> {
                   Icon(
                     Icons.description_outlined,
                     size: 80,
-                    color: Color(0xFF9CA3AF),
+                    color: Color(0xFFD1D5DB), // Brighter grey
                   ),
                   SizedBox(height: 20),
                   Text(
@@ -1362,7 +1534,7 @@ class _ManbookHomeState extends State<ManbookHome> {
                     style: TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.bold,
-                      color: Color(0xFF9CA3AF),
+                      color: Color(0xFFD1D5DB), // Brighter grey
                     ),
                   ),
                 ],

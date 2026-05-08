@@ -41,6 +41,32 @@ class SystemOrchestrator:
             "Chapter 7": "Warranty & Service"
         }
 
+    def _update_progress(self, session_id, current_page, total_pages, stage_pct, message):
+        """
+        Unified progress update with scaling.
+        Total processing (all pages) occupies 5% to 85% of total progress.
+        """
+        if not session_id or session_id not in self.progress_tracker:
+            return
+
+        # Processing pages range: 5% -> 85%
+        start_range = 5
+        end_range = 85
+        range_size = end_range - start_range
+
+        # Progress within the current page (0.0 to 1.0)
+        # stage_pct is 0-100 within the page
+        page_progress = (current_page - 1) / total_pages + (stage_pct / 100.0) / total_pages
+        
+        total_pct = start_range + int(page_progress * range_size)
+        
+        self.progress_tracker[session_id].update({
+            "current_page": current_page,
+            "total_pages": total_pages,
+            "percentage": total_pct,
+            "message": message
+        })
+
     def _remap_chapter(self, bab_id, target_lang):
         """Remap BAB -> Chapter or Chapter -> BAB based on target language."""
         if target_lang == 'en' and bab_id.startswith('BAB '):
@@ -126,7 +152,7 @@ class SystemOrchestrator:
             "_direct_read": element.get('_direct_read', False)
         }
 
-    async def run_ocr_pipeline(self, images, filename, session_id, lang, direct_translate, text_corrector_hl):
+    def run_ocr_pipeline(self, images, filename, session_id, lang, direct_translate, text_corrector_hl, single_column_mode=False):
         """Process scanned PDF or images using OCR."""
         self.brain.reset_context() 
         total_pages = len(images)
@@ -136,16 +162,16 @@ class SystemOrchestrator:
         print(f"\n  🚀  Processing {total_pages} pages...")
         for i, img_src in enumerate(images):
             current_page = i + 1
-            pct = int((current_page / total_pages) * 100)
             
-            # (Progress Tracker Updates...)
-            self.progress_tracker[session_id].update({
-                "current_page": current_page, "percentage": pct,
-                "message": f"Processing page {current_page} of {total_pages}..."
-            })
+            # Initial stage for page
+            self._update_progress(
+                session_id, current_page, total_pages, 10, 
+                f"Membaca Halaman {current_page}/{total_pages}..."
+            )
             
             # Print page progress to terminal
-            print(f"      [ {pct:3d}% ] Reading Page {current_page}/{total_pages}...", end='\r')
+            pct_log = int((current_page / total_pages) * 100)
+            print(f"      [ {pct_log:3d}% ] Reading Page {current_page}/{total_pages}...", end='\r')
             
             page_path = img_src
             if not isinstance(img_src, str):
@@ -153,7 +179,11 @@ class SystemOrchestrator:
                 img_src.save(page_path, "PNG")
             
             try:
-                col_paths = split_columns_simple(page_path, f"{filename}_{i}", self.output_dir)
+                if single_column_mode:
+                    logger.info("Single column mode enabled, skipping split_columns_simple")
+                    col_paths = [page_path]
+                else:
+                    col_paths = split_columns_simple(page_path, f"{filename}_{i}", self.output_dir)
             except Exception as e:
                 logger.warning(f"Column split failed: {e}")
                 col_paths = [page_path]
@@ -178,16 +208,32 @@ class SystemOrchestrator:
                 clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(preview_fname)}")
                 
             for col_idx, col_path in enumerate(col_paths):
+                # Update progress for OCR stage within page
+                self._update_progress(
+                    session_id, current_page, total_pages, 30 + (col_idx * 10), 
+                    f"OCR Halaman {current_page}, Kolom {col_idx+1}..."
+                )
+                
                 scan_result = self.vision.scan_document(
                     col_path, f"{filename}_{i}_c{col_idx}", lang=lang, direct_translate=direct_translate
                 )
                 
                 layout_elements = scan_result if isinstance(scan_result, list) else scan_result.get('elements', [])
                 
+                if layout_elements:
+                    logger.info(f"📄 Page {current_page} Col {col_idx+1}: {len(layout_elements)} elements found")
+                else:
+                    logger.warning(f"⚠️ Page {current_page} Col {col_idx+1}: 0 elements! scan_result type={type(scan_result).__name__}")
+                
                 for element in layout_elements:
                     element['source_image_local'] = col_path
                     item = self._normalize_element(element, lang, direct_translate, text_corrector_hl)
                     structured_data.append(item)
+                
+                self._update_progress(
+                    session_id, current_page, total_pages, 90, 
+                    f"Selesai OCR Halaman {current_page}."
+                )
             
             if not isinstance(img_src, str) and os.path.exists(page_path):
                 try: os.remove(page_path)
@@ -196,7 +242,11 @@ class SystemOrchestrator:
         print(f"\n  ✅  Extraction Complete: {len(structured_data)} elements found.")
         
         # ─── Global Classification Refinement (NEW) ───
-        structured_data = await self.refine_classification(structured_data, lang)
+        self._update_progress(
+            session_id, total_pages, total_pages, 95, 
+            "Mempertajam klasifikasi bab..."
+        )
+        structured_data = self.refine_classification(structured_data, lang)
         
         # Print Chapter Summary
         chapters_found = sorted(list(set(item['chapter_id'] for item in structured_data)))
@@ -207,301 +257,363 @@ class SystemOrchestrator:
                 
         return structured_data, clean_pages_urls
 
-    async def run_hybrid_direct_pipeline(self, pdf_path, filename, session_id, lang, direct_translate, text_corrector_hl):
+    def run_hybrid_direct_pipeline(self, pdf_path, filename, session_id, lang, direct_translate, text_corrector_hl, single_column_mode=False):
         """
         Ultimate Hybrid Pipeline: Surya Layout + Direct Text Extraction.
+        Processes pages in batches to avoid OOM for large PDFs.
         """
         self.brain.reset_context() # MUST RESET
         import pdfplumber
         import numpy as np
+        import gc
+        from pdf2image import convert_from_path
+        import PyPDF2
         
         structured_data = []
         clean_pages_urls = []
         
         logger.info(f"🚀 Running Hybrid Direct Pipeline (Surya Layout + PDF Text) for {filename}")
         
-        # 1. Convert to images for Surya
-        images = convert_pdf_to_images_safe(pdf_path)
-        total_pages = len(images)
+        # Get total page count without loading images
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                total_pages = len(reader.pages)
+        except Exception:
+            total_pages = 0
+        
+        # Poppler path for pdf2image
+        poppler = os.environ.get('POPPLER_PATH')
+        if not poppler:
+            for p in [r"C:\poppler\Library\bin", r"C:\poppler\bin"]:
+                if os.path.exists(p):
+                    poppler = p
+                    break
+        
+        pdf2img_params = {'dpi': 300}
+        if poppler:
+            pdf2img_params['poppler_path'] = poppler
+        
+        # Process pages in batches to avoid OOM
+        BATCH_SIZE = 10
         
         with pdfplumber.open(pdf_path) as pdf:
-            for i, page_img in enumerate(images):
-                current_page = i + 1
-                pct = int((current_page / total_pages) * 100)
+            if total_pages == 0:
+                total_pages = len(pdf.pages)
+            
+            for batch_start in range(0, total_pages, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, total_pages)
                 
-                self.progress_tracker[session_id].update({
-                    "current_page": current_page, "percentage": pct,
-                    "message": f"Analyzing layout (Surya) page {current_page}..."
-                })
-                print(f"      [ {pct:3d}% ] Hybrid Layout Page {current_page}/{total_pages}...", end='\r')
+                # Convert only this batch of pages to images
+                batch_params = dict(pdf2img_params)
+                batch_params['first_page'] = batch_start + 1  # 1-indexed
+                batch_params['last_page'] = batch_end
                 
-                # Save page image for Surya layout analysis
-                page_fname = f"PREVIEW_{filename}_{i}.jpg"
-                page_path = os.path.join(self.output_dir, page_fname)
-                page_img.save(page_path, "JPEG", quality=90)
-                
-                # NOTE: We do NOT add the full page to clean_pages_urls here.
-                # If columns are detected, only column crops will be added.
-                # If no columns are detected (single column), we add it below.
-                full_page_url = f"http://127.0.0.1:8000/output/{quote(page_fname)}"
-                
-                # Render for Surya layout (OpenCV format)
-                img_cv = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
-                ch, cw = img_cv.shape[:2]
-                
-                # Run Surya Layout Detection (Visual Only) once per page
-                regions = self.vision._detect_layout(img_cv)
-                visual_regions = [r for r in regions if r['type'] in ('table', 'figure', 'formula')]
-                
-                # Scale factors for coordinate conversion
-                scale_y = ch / pdf.pages[i].height if pdf.pages[i].height > 0 else 1.0
-                
-                # 2. Column Detection (Visual projection)
-                # This ensures we extract text in the correct reading order for multi-column manuals
-                col_boundaries = [0, cw]
                 try:
-                    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-                    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+                    batch_images = convert_from_path(pdf_path, **batch_params)
+                except Exception:
+                    batch_params_copy = {k: v for k, v in batch_params.items() if k != 'poppler_path'}
+                    batch_images = convert_from_path(pdf_path, **batch_params_copy)
+                
+                logger.info(f"📄 Hybrid batch {batch_start+1}-{batch_end}/{total_pages} ({len(batch_images)} pages)")
+                
+                for batch_idx, page_img in enumerate(batch_images):
+                    i = batch_start + batch_idx  # Global page index
+                    current_page = i + 1
+                
+                    self._update_progress(
+                        session_id, current_page, total_pages, 10,
+                        f"Menganalisis layout (Surya) halaman {current_page}/{total_pages}..."
+                    )
+                
+                    pct_log = int((current_page / total_pages) * 100)
+                    print(f"      [ {pct_log:3d}% ] Hybrid Layout Page {current_page}/{total_pages}...", end='\r')
+                
+                    # Save page image for Surya layout analysis
+                    page_fname = f"PREVIEW_{filename}_{i}.jpg"
+                    page_path = os.path.join(self.output_dir, page_fname)
+                    page_img.save(page_path, "JPEG", quality=90)
+                
+                    # NOTE: We do NOT add the full page to clean_pages_urls here.
+                    # If columns are detected, only column crops will be added.
+                    # If no columns are detected (single column), we add it below.
+                    full_page_url = f"http://127.0.0.1:8000/output/{quote(page_fname)}"
+                
+                    # Render for Surya layout (OpenCV format)
+                    img_cv = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
+                    ch, cw = img_cv.shape[:2]
                     
-                    # Vertical projection on 84% of page (ignore headers/footers)
-                    h_start = int(ch * 0.08)
-                    h_end = int(ch * 0.92)
-                    roi = binary[h_start:h_end, :]
-                    white_ratio = np.mean(roi == 255, axis=0)
-                    
-                    # Robust smoothing — 1% of page width
-                    k_size = max(7, int(cw * 0.01))
-                    white_smooth = np.convolve(white_ratio, np.ones(k_size)/k_size, mode='same')
-                    
-                    # Strict cover page logic if it's the first page
-                    if current_page == 1:
-                        is_gap = white_smooth > 0.98
-                        min_gap_width = int(cw * 0.05)
+                    # Free PIL image memory immediately
+                    del page_img
+                
+                    # Run Surya Layout Detection (Visual Only) once per page
+                    regions = self.vision._detect_layout(img_cv)
+                    visual_regions = [r for r in regions if r['type'] in ('table', 'figure', 'formula')]
+                
+                    # Scale factors for coordinate conversion
+                    scale_y = ch / pdf.pages[i].height if pdf.pages[i].height > 0 else 1.0
+                
+                    # 2. Column Detection (Visual projection)
+                    # This ensures we extract text in the correct reading order for multi-column manuals
+                    col_boundaries = [0, cw]
+                    try:
+                        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
                         
-                        gaps = []
-                        in_gap = False
-                        gap_start = 0
-                        for x in range(cw):
-                            if is_gap[x] and not in_gap:
-                                gap_start = x
-                                in_gap = True
-                            elif not is_gap[x] and in_gap:
-                                gap_w = x - gap_start
-                                if gap_w >= min_gap_width:
-                                    gc = gap_start + gap_w // 2
-                                    if cw * 0.05 < gc < cw * 0.95:
-                                        gaps.append(gc)
-                                in_gap = False
-                    else:
-                        # Multi-pass gap detection: strict → lenient
-                        gaps = []
-                        pass_configs = [
-                            (0.95, 0.02),   # Real column gutters
-                            (0.90, 0.015),  # Slightly less strict
-                            (0.85, 0.012),  # More tolerant
-                        ]
+                        # Vertical projection on 84% of page (ignore headers/footers)
+                        h_start = int(ch * 0.08)
+                        h_end = int(ch * 0.92)
+                        roi = binary[h_start:h_end, :]
+                        white_ratio = np.mean(roi == 255, axis=0)
                         
-                        for pass_thresh, pass_min_pct in pass_configs:
-                            is_gap_pass = white_smooth > pass_thresh
-                            min_gap_w = max(10, int(cw * pass_min_pct))
+                        # Robust smoothing — 1% of page width
+                        k_size = max(7, int(cw * 0.01))
+                        white_smooth = np.convolve(white_ratio, np.ones(k_size)/k_size, mode='same')
+                        
+                        # Strict cover page logic if it's the first page
+                        if current_page == 1:
+                            is_gap = white_smooth > 0.98
+                            min_gap_width = int(cw * 0.05)
                             
-                            pass_gaps = []
+                            gaps = []
                             in_gap = False
                             gap_start = 0
                             for x in range(cw):
-                                if is_gap_pass[x] and not in_gap:
+                                if is_gap[x] and not in_gap:
                                     gap_start = x
                                     in_gap = True
-                                elif not is_gap_pass[x] and in_gap:
+                                elif not is_gap[x] and in_gap:
                                     gap_w = x - gap_start
-                                    if gap_w >= min_gap_w:
-                                        gc = gap_start + gap_w // 2
-                                        if cw * 0.05 < gc < cw * 0.95:
-                                            pass_gaps.append(gc)
+                                    if gap_w >= min_gap_width:
+                                        gc_pos = gap_start + gap_w // 2
+                                        if cw * 0.05 < gc_pos < cw * 0.95:
+                                            gaps.append(gc_pos)
                                     in_gap = False
-                            
-                            if pass_gaps:
-                                pass_gaps.sort()
-                                filtered = [pass_gaps[0]]
-                                for g in pass_gaps[1:]:
-                                    if g - filtered[-1] > cw * 0.15:
-                                        filtered.append(g)
-                                
-                                num_found = len(filtered) + 1
-                                if 2 <= num_found <= 4:
-                                    gaps = filtered
-                                    logger.info(f"   Hybrid col detection (thresh={pass_thresh}): {num_found} cols, gaps={gaps}")
-                                    break
-                    
-                    # Filter gaps too close to each other (safety)
-                    filtered_gaps = []
-                    if gaps:
-                        gaps.sort()
-                        filtered_gaps.append(gaps[0])
-                        for g in gaps[1:]:
-                            if g - filtered_gaps[-1] > cw * 0.15:
-                                filtered_gaps.append(g)
-                                
-                    gaps = filtered_gaps
-                    col_boundaries = [0] + sorted(gaps) + [cw]
-                    num_cols = len(col_boundaries) - 1
-                    
-                    # Validate columns: wide enough and balanced
-                    if num_cols > 1:
-                        col_widths = []
-                        valid_cols = []
-                        for c_idx in range(num_cols):
-                            c_w = col_boundaries[c_idx+1] - col_boundaries[c_idx]
-                            col_widths.append(c_w)
-                            if c_w > cw * 0.10:
-                                valid_cols.append(c_idx)
-                        if len(valid_cols) < 2:
-                            col_boundaries = [0, cw]
                         else:
-                            # Balance check
-                            valid_widths = [col_widths[i] for i in valid_cols]
-                            if max(valid_widths) > 3 * min(valid_widths):
-                                logger.info(f"Hybrid: unbalanced column widths {[int(c) for c in col_widths]}, using single column")
-                                col_boundaries = [0, cw]
+                            # Multi-pass gap detection: strict → lenient
+                            gaps = []
+                            pass_configs = [
+                                (0.95, 0.02),   # Real column gutters
+                                (0.90, 0.015),  # Slightly less strict
+                                (0.85, 0.012),  # More tolerant
+                            ]
                             
-                    if len(col_boundaries) - 1 > 4:
-                        logger.warning(f"Too many columns ({len(col_boundaries)-1}), capping at 4")
-                        gaps = gaps[:3]
+                            for pass_thresh, pass_min_pct in pass_configs:
+                                is_gap_pass = white_smooth > pass_thresh
+                                min_gap_w = max(10, int(cw * pass_min_pct))
+                                
+                                pass_gaps = []
+                                in_gap = False
+                                gap_start = 0
+                                for x in range(cw):
+                                    if is_gap_pass[x] and not in_gap:
+                                        gap_start = x
+                                        in_gap = True
+                                    elif not is_gap_pass[x] and in_gap:
+                                        gap_w = x - gap_start
+                                        if gap_w >= min_gap_w:
+                                            gc_pos = gap_start + gap_w // 2
+                                            if cw * 0.05 < gc_pos < cw * 0.95:
+                                                pass_gaps.append(gc_pos)
+                                        in_gap = False
+                                
+                                if pass_gaps:
+                                    pass_gaps.sort()
+                                    filtered = [pass_gaps[0]]
+                                    for g in pass_gaps[1:]:
+                                        if g - filtered[-1] > cw * 0.15:
+                                            filtered.append(g)
+                                    
+                                    num_found = len(filtered) + 1
+                                    if 2 <= num_found <= 4:
+                                        gaps = filtered
+                                        logger.info(f"   Hybrid col detection (thresh={pass_thresh}): {num_found} cols, gaps={gaps}")
+                                        break
+                        
+                        # Filter gaps too close to each other (safety)
+                        filtered_gaps = []
+                        if gaps:
+                            gaps.sort()
+                            filtered_gaps.append(gaps[0])
+                            for g in gaps[1:]:
+                                if g - filtered_gaps[-1] > cw * 0.15:
+                                    filtered_gaps.append(g)
+                                    
+                        gaps = filtered_gaps
                         col_boundaries = [0] + sorted(gaps) + [cw]
+                        num_cols = len(col_boundaries) - 1
                         
-                    if len(col_boundaries) - 1 > 1:
-                        logger.info(f"Hybrid Page {current_page}: detected {len(col_boundaries)-1} columns")
-                except Exception as e_col:
-                    logger.warning(f"Hybrid column detection failed: {e_col}")
-
-                # 3. Process each column individually
-                num_cols = len(col_boundaries) - 1
-                page_has_columns = num_cols > 1
-                
-                # If single column, add the full page to preview
-                if not page_has_columns:
-                    clean_pages_urls.append(full_page_url)
-                    logger.info(f"📐 Hybrid Preview: Page {current_page} → Single Column")
-                else:
-                    logger.info(f"📐 Hybrid Preview: Page {current_page} → {num_cols} Columns")
-                
-                for col_idx in range(num_cols):
-                    cx1, cx2 = col_boundaries[col_idx], col_boundaries[col_idx+1]
-                    
-                    # CROP: Separate image for each column in preview (User Request!)
-                    col_pad_px = 5
-                    cpx1, cpx2 = max(0, int(cx1 - col_pad_px)), min(cw, int(cx2 + col_pad_px))
-                    col_img_cv = img_cv[0:ch, cpx1:cpx2]
-                    
-                    col_fname = f"PREVIEW_{filename}_p{i}_c{col_idx+1}.jpg"
-                    col_path = os.path.join(self.output_dir, col_fname)
-                    cv2.imwrite(col_path, col_img_cv, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                    
-                    # Only add column crops to preview when multi-column is detected
-                    if page_has_columns:
-                        clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(col_fname)}")
-                    
-                    # 4. Surya Regions in this column
-                    # Convert pixel boundaries to Surya/Image coordinates (same here as it's the full page)
-                    col_regions = []
-                    for vr in visual_regions:
-                        vbox = vr['bbox']
-                        # Check if region center is within column boundaries
-                        v_center_x = (vbox[0] + vbox[2]) / 2
-                        if cx1 <= v_center_x <= cx2:
-                            col_regions.append(vr)
+                        # Force single column if requested
+                        if single_column_mode:
+                            col_boundaries = [0, cw]
+                            logger.info(f"Hybrid Page {current_page}: single_column_mode active, ignoring visual gaps")
+                        
+                        # Validate columns: wide enough and balanced
+                        if len(col_boundaries) > 2:
+                            col_widths = []
+                            valid_cols = []
+                            for c_idx in range(num_cols):
+                                c_w = col_boundaries[c_idx+1] - col_boundaries[c_idx]
+                                col_widths.append(c_w)
+                                if c_w > cw * 0.10:
+                                    valid_cols.append(c_idx)
+                            if len(valid_cols) < 2:
+                                col_boundaries = [0, cw]
+                            else:
+                                # Balance check
+                                valid_widths = [col_widths[ci] for ci in valid_cols]
+                                if max(valid_widths) > 3 * min(valid_widths):
+                                    logger.info(f"Hybrid: unbalanced column widths {[int(c) for c in col_widths]}, using single column")
+                                    col_boundaries = [0, cw]
+                                
+                        if len(col_boundaries) - 1 > 4:
+                            logger.warning(f"Too many columns ({len(col_boundaries)-1}), capping at 4")
+                            col_boundaries = [0] + sorted(gaps[:3]) + [cw]
                             
-                    # 5. Extract PDF Words in this column
-                    pdf_page = pdf.pages[i]
-                    # Convert pixel boundaries back to PDF units for extraction
-                    scale_to_pdf = pdf_page.width / cw
-                    pcx1, pcx2 = cx1 * scale_to_pdf, cx2 * scale_to_pdf
+                        if len(col_boundaries) - 1 > 1:
+                            logger.info(f"Hybrid Page {current_page}: detected {len(col_boundaries)-1} columns")
+                    except Exception as e_col:
+                        logger.warning(f"Hybrid column detection failed: {e_col}")
+
+                    # 3. Process each column individually
+                    num_cols = len(col_boundaries) - 1
+                    page_has_columns = num_cols > 1
                     
-                    # Narrow extraction zone to this column
-                    col_words = pdf_page.crop((max(0, pcx1 - 5), 0, min(pdf_page.width, pcx2 + 5), pdf_page.height)).extract_words(
-                        x_tolerance=3, y_tolerance=3, keep_blank_chars=False, extra_attrs=['fontname', 'size']
-                    )
+                    # If single column, add the full page to preview
+                    if not page_has_columns:
+                        clean_pages_urls.append(full_page_url)
+                        logger.info(f"📐 Hybrid Preview: Page {current_page} → Single Column")
+                    else:
+                        logger.info(f"📐 Hybrid Preview: Page {current_page} → {num_cols} Columns")
                     
-                    # Filter out words that fall within visual boxes
-                    filtered_words = []
-                    for w in col_words:
-                        # wx1, wy1, wx2, wy2 in PDF units
-                        # But Surya bboxes are in pixels, need to convert word to pixels or Surya to PDF
-                        w_pixels = [w['x0'] / scale_to_pdf, w['top'] * scale_y, w['x1'] / scale_to_pdf, w['bottom'] * scale_y]
+                    for col_idx in range(num_cols):
+                        cx1, cx2 = col_boundaries[col_idx], col_boundaries[col_idx+1]
                         
-                        is_inside_visual = False
-                        for vr in col_regions:
-                            v_bbox = vr['bbox']
-                            # Check overlap in pixels
-                            ov_x1 = max(w_pixels[0], v_bbox[0])
-                            ov_y1 = max(w_pixels[1], v_bbox[1])
-                            ov_x2 = min(w_pixels[2], v_bbox[2])
-                            ov_y2 = min(w_pixels[3], v_bbox[3])
-                            if ov_x2 > ov_x1 and ov_y2 > ov_y1:
-                                ov_area = (ov_x2 - ov_x1) * (ov_y2 - ov_y1)
-                                w_area = (w_pixels[2] - w_pixels[0]) * (w_pixels[3] - w_pixels[1])
-                                if w_area > 0 and (ov_area / w_area) > 0.5:
-                                    is_inside_visual = True
-                                    break
+                        # CROP: Separate image for each column in preview (User Request!)
+                        col_pad_px = 5
+                        cpx1, cpx2 = max(0, int(cx1 - col_pad_px)), min(cw, int(cx2 + col_pad_px))
+                        col_img_cv = img_cv[0:ch, cpx1:cpx2]
                         
-                        if not is_inside_visual:
-                            filtered_words.append(w)
-                    
-                    # Group filtered words into paragraphs
-                    from direct_reader import _group_words_into_lines, _merge_lines_into_paragraphs
-                    lines = _group_words_into_lines(filtered_words, pdf_page.height)
-                    paragraphs = _merge_lines_into_paragraphs(lines, pdf_page.width, pdf_page.height)
-                    
-                    for para in paragraphs:
-                        text = para['text'].strip()
-                        if not text: continue
+                        col_fname = f"PREVIEW_{filename}_p{i}_c{col_idx+1}.jpg"
+                        col_path = os.path.join(self.output_dir, col_fname)
+                        cv2.imwrite(col_path, col_img_cv, [cv2.IMWRITE_JPEG_QUALITY, 90])
                         
-                        etype = "paragraph"
-                        if para.get('avg_size', 11) > 13 or para.get('is_bold'):
-                            etype = "heading"
+                        # Only add column crops to preview when multi-column is detected
+                        if page_has_columns:
+                            clean_pages_urls.append(f"http://127.0.0.1:8000/output/{quote(col_fname)}")
                         
-                        element = {
-                            "type": etype,
-                            "text": text,
-                            "bbox": para['bbox'],
-                            "source_image_local": col_path,
-                            "confidence": 1.0,
-                            "_direct_read": True
-                        }
-                        item = self._normalize_element(element, lang, direct_translate, text_corrector_hl)
-                        structured_data.append(item)
-                    
-                    # 6. Add Visual Crops for this column
-                    for idx, vr in enumerate(col_regions):
-                        vbox = vr['bbox']
-                        rtype = vr['type']
+                        # 4. Surya Regions in this column
+                        # Convert pixel boundaries to Surya/Image coordinates (same here as it's the full page)
+                        col_regions = []
+                        for vr in visual_regions:
+                            vbox = vr['bbox']
+                            # Check if region center is within column boundaries
+                            v_center_x = (vbox[0] + vbox[2]) / 2
+                            if cx1 <= v_center_x <= cx2:
+                                col_regions.append(vr)
+                                
+                        # 5. Extract PDF Words in this column
+                        pdf_page = pdf.pages[i]
+                        # Convert pixel boundaries back to PDF units for extraction
+                        scale_to_pdf = pdf_page.width / cw
+                        pcx1, pcx2 = cx1 * scale_to_pdf, cx2 * scale_to_pdf
                         
-                        pad = 10
-                        px1, py1 = max(0, int(vbox[0] - pad)), max(0, int(vbox[1] - pad))
-                        px2, py2 = min(cw, int(vbox[2] + pad)), min(ch, int(vbox[3] + pad))
-                        crop_visual = img_cv[py1:py2, px1:px2]
+                        # Narrow extraction zone to this column
+                        col_words = pdf_page.crop((max(0, pcx1 - 5), 0, min(pdf_page.width, pcx2 + 5), pdf_page.height)).extract_words(
+                            x_tolerance=3, y_tolerance=3, keep_blank_chars=False, extra_attrs=['fontname', 'size']
+                        )
                         
-                        if crop_visual.size > 0:
-                            crop_fname = f"{filename}_p{i}_c{col_idx+1}_v{idx}_{rtype}.png"
-                            crop_path = os.path.join(self.output_dir, crop_fname)
-                            cv2.imwrite(crop_path, crop_visual)
+                        # Filter out words that fall within visual boxes
+                        filtered_words = []
+                        for w in col_words:
+                            # wx1, wy1, wx2, wy2 in PDF units
+                            # But Surya bboxes are in pixels, need to convert word to pixels or Surya to PDF
+                            w_pixels = [w['x0'] / scale_to_pdf, w['top'] * scale_y, w['x1'] / scale_to_pdf, w['bottom'] * scale_y]
+                            
+                            is_inside_visual = False
+                            for vr in col_regions:
+                                v_bbox = vr['bbox']
+                                # Check overlap in pixels
+                                ov_x1 = max(w_pixels[0], v_bbox[0])
+                                ov_y1 = max(w_pixels[1], v_bbox[1])
+                                ov_x2 = min(w_pixels[2], v_bbox[2])
+                                ov_y2 = min(w_pixels[3], v_bbox[3])
+                                if ov_x2 > ov_x1 and ov_y2 > ov_y1:
+                                    ov_area = (ov_x2 - ov_x1) * (ov_y2 - ov_y1)
+                                    w_area = (w_pixels[2] - w_pixels[0]) * (w_pixels[3] - w_pixels[1])
+                                    if w_area > 0 and (ov_area / w_area) > 0.5:
+                                        is_inside_visual = True
+                                        break
+                            
+                            if not is_inside_visual:
+                                filtered_words.append(w)
+                        
+                        # Group filtered words into paragraphs
+                        from direct_reader import _group_words_into_lines, _merge_lines_into_paragraphs
+                        lines = _group_words_into_lines(filtered_words, pdf_page.height)
+                        paragraphs = _merge_lines_into_paragraphs(lines, pdf_page.width, pdf_page.height)
+                        
+                        for para in paragraphs:
+                            text = para['text'].strip()
+                            if not text: continue
+                            
+                            etype = "paragraph"
+                            if para.get('avg_size', 11) > 13 or para.get('is_bold'):
+                                etype = "heading"
                             
                             element = {
-                                "type": rtype,
-                                "text": f"[{rtype.upper()}]",
-                                "bbox": vbox,
-                                "crop_url": f"http://127.0.0.1:8000/output/{quote(crop_fname)}",
-                                "crop_local": crop_path,
+                                "type": etype,
+                                "text": text,
+                                "bbox": para['bbox'],
                                 "source_image_local": col_path,
-                                "confidence": 1.0
+                                "confidence": 1.0,
+                                "_direct_read": True
                             }
                             item = self._normalize_element(element, lang, direct_translate, text_corrector_hl)
                             structured_data.append(item)
+                        
+                        # 6. Add Visual Crops for this column
+                        for idx, vr in enumerate(col_regions):
+                            vbox = vr['bbox']
+                            rtype = vr['type']
+                            
+                            pad = 10
+                            px1, py1 = max(0, int(vbox[0] - pad)), max(0, int(vbox[1] - pad))
+                            px2, py2 = min(cw, int(vbox[2] + pad)), min(ch, int(vbox[3] + pad))
+                            crop_visual = img_cv[py1:py2, px1:px2]
+                            
+                            if crop_visual.size > 0:
+                                crop_fname = f"{filename}_p{i}_c{col_idx+1}_v{idx}_{rtype}.png"
+                                crop_path = os.path.join(self.output_dir, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+                                
+                                element = {
+                                    "type": rtype,
+                                    "text": f"[{rtype.upper()}]",
+                                    "bbox": vbox,
+                                    "crop_url": f"http://127.0.0.1:8000/output/{quote(crop_fname)}",
+                                    "crop_local": crop_path,
+                                    "source_image_local": col_path,
+                                    "confidence": 1.0
+                                }
+                                item = self._normalize_element(element, lang, direct_translate, text_corrector_hl)
+                                structured_data.append(item)
+                    
+                    # Free page image memory
+                    del img_cv
+                
+                # Free batch images memory
+                del batch_images
+                gc.collect()
 
         print(f"\n  ✅  Hybrid Direct Extraction Complete: {len(structured_data)} elements.")
         
         # ─── Global Classification Refinement (NEW) ───
-        structured_data = await self.refine_classification(structured_data, lang)
+        self._update_progress(
+            session_id, total_pages, total_pages, 95, 
+            "Mempertajam klasifikasi bab..."
+        )
+        structured_data = self.refine_classification(structured_data, lang)
         
         return structured_data, clean_pages_urls
 
@@ -562,7 +674,7 @@ Return ONLY JSON: {{"product_name": "...", "product_description": "..."}}"""
             
         return None, None
 
-    async def refine_classification(self, structured_data, lang):
+    def refine_classification(self, structured_data, lang):
         """
         Global Refinement: Collect all headings and re-classify them as a sequence.
         This provides context that isolated classification lacks.

@@ -27,6 +27,8 @@ def _is_watermark(text: str) -> bool:
 
 def convert_pdf_to_images_safe(path, dpi=300, max_pages=None):
     from pdf2image import convert_from_path
+    import PyPDF2
+    
     poppler = os.environ.get('POPPLER_PATH')
     if not poppler:
          for p in [r"C:\poppler\Library\bin", r"C:\poppler\bin"]:
@@ -34,41 +36,127 @@ def convert_pdf_to_images_safe(path, dpi=300, max_pages=None):
                  poppler = p
                  break
     
-    # pdf2image uses first_page and last_page (1-indexed)
-    params = {'dpi': dpi, 'poppler_path': poppler}
-    if max_pages:
-        params['last_page'] = max_pages
+    base_params = {'dpi': dpi}
+    if poppler:
+        base_params['poppler_path'] = poppler
 
+    # Determine total page count
     try:
-        return convert_from_path(path, **params)
+        with open(path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            total_pages = len(reader.pages)
     except Exception:
-        if 'poppler_path' in params: del params['poppler_path']
-        return convert_from_path(path, **params)
+        total_pages = None  # Unknown, will use single call
+    
+    if max_pages:
+        if total_pages:
+            total_pages = min(total_pages, max_pages)
+        else:
+            total_pages = max_pages
+    
+    # ── Batch processing: convert pages in chunks to avoid OOM ──
+    # Each page at 300dpi ≈ 25MB RAM. 20 pages ≈ 500MB per batch.
+    BATCH_SIZE = 20
+    
+    def _convert(params):
+        try:
+            return convert_from_path(path, **params)
+        except Exception:
+            # Retry without poppler_path (maybe it's in PATH)
+            params_copy = {k: v for k, v in params.items() if k != 'poppler_path'}
+            return convert_from_path(path, **params_copy)
+    
+    # Small PDFs: single call (unchanged behavior)
+    if total_pages is None or total_pages <= BATCH_SIZE:
+        params = dict(base_params)
+        if max_pages:
+            params['last_page'] = max_pages
+        return _convert(params)
+    
+    # Large PDFs: batch processing
+    all_images = []
+    for start in range(0, total_pages, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, total_pages)
+        params = dict(base_params)
+        params['first_page'] = start + 1  # 1-indexed
+        params['last_page'] = end
+        
+        batch_images = _convert(params)
+        all_images.extend(batch_images)
+        
+        logger.info(f"📄 PDF→Images: batch {start+1}-{end}/{total_pages} ({len(batch_images)} pages)")
+        
+        # Free memory between batches
+        import gc
+        gc.collect()
+    
+    return all_images
 
 def remove_watermarks_and_enhance(image_cv):
     """
-    Remove light-colored background watermarks and enhance contrast for better OCR.
-    Uses 'bleaching' technique for gray/light-colored text.
+    Remove colored watermarks (red/pink/light text overlays) WITHOUT destroying
+    the actual document content.
+    
+    Strategy:
+      - Use HSV color masking to isolate only colored watermark pixels
+        (red, pink, orange, light-colored diagonal text)
+      - Replace those pixels with white
+      - If no watermark pixels found, return None (skip enhancement)
+      
+    IMPORTANT: This function must NEVER bleach the entire page.
+    The old threshold(220) approach was catastrophic — it turned every page blank.
     """
     if image_cv is None: return None
     
-    # 1. Convert to grayscale
-    gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Bleaching: Watermarks are often intermediate gray.
-    # We use a high threshold to push everything light to white.
-    # Typical watermark gray is around 180-230.
-    _, bleached = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
-    
-    # 3. Use the bleached mask to clean the original image (make background pure white)
-    # This keeps dark text but removes light watermarks.
-    enhanced = cv2.cvtColor(bleached, cv2.COLOR_GRAY2BGR)
-    
-    # 4. Sharpen for OCR
-    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    enhanced = cv2.filter2D(enhanced, -1, kernel)
-    
-    return enhanced
+    try:
+        h, w = image_cv.shape[:2]
+        total_pixels = h * w
+        
+        # Convert to HSV for color-based watermark detection
+        hsv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2HSV)
+        
+        # Target: Red/Pink watermarks (common in medical device manuals)
+        mask_red1 = cv2.inRange(hsv, np.array([0,   40, 150]), np.array([10,  255, 255]))
+        mask_red2 = cv2.inRange(hsv, np.array([160, 40, 150]), np.array([180, 255, 255]))
+        # Target: Orange/Yellow watermarks
+        mask_orange = cv2.inRange(hsv, np.array([10,  50, 150]), np.array([25,  255, 255]))
+        # Target: Light gray watermarks (very light, NOT normal text)
+        # Normal text is dark (value < 150), watermarks are light (value > 200)
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+        # Light gray pixels that are NOT white background (180-220 range = typical watermark gray)
+        mask_light_gray = cv2.inRange(gray, 180, 225)
+        
+        # Combine color masks (not gray — gray mask is too risky)
+        watermark_mask = mask_red1 | mask_red2 | mask_orange
+        
+        # Dilate slightly to cover watermark edges
+        kernel = np.ones((3, 3), np.uint8)
+        watermark_mask = cv2.dilate(watermark_mask, kernel, iterations=1)
+        
+        # Safety: Only apply if watermark covers < 15% of page
+        # (real watermarks are sparse; if it's more, we're probably catching content)
+        watermark_ratio = cv2.countNonZero(watermark_mask) / total_pixels
+        
+        if watermark_ratio < 0.001:
+            # No significant watermark detected — skip enhancement entirely
+            return None
+        
+        if watermark_ratio > 0.15:
+            # Too much detected — probably catching actual content, abort
+            logger.info(f"Watermark removal: {watermark_ratio:.1%} of pixels matched — too much, skipping")
+            return None
+        
+        logger.info(f"Watermark removal: cleaning {watermark_ratio:.1%} of pixels (colored watermark)")
+        
+        # Replace watermark pixels with white
+        enhanced = image_cv.copy()
+        enhanced[watermark_mask > 0] = (255, 255, 255)
+        
+        return enhanced
+        
+    except Exception as e:
+        logger.warning(f"Watermark removal failed: {e}")
+        return None
 
 def split_columns_simple(image_path, filename_base, output_dir):
     """
@@ -91,22 +179,18 @@ def split_columns_simple(image_path, filename_base, output_dir):
     _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
     
     # Vertical projection: calculate white pixel ratio per column-x
-    # Ignore top 8% and bottom 8% (header/footer are usually full-width)
-    margin_y = int(h * 0.08)
+    # Ignore top 12% and bottom 12% (header/footer and spanning titles usually live here)
+    margin_y = int(h * 0.12)
     roi = binary[margin_y:h - margin_y, :]
     
-    # Calculate % white pixels per x-column
+    # Calculate % white pixels per x-column in the ROI
     white_ratio = np.mean(roi == 255, axis=0)  # array shape (w,)
     
-    # Robust smoothing — proportional to image width
-    # Use 1% of width for strong noise reduction (e.g. 35px for 3508px wide A4 @ 300dpi)
+    # Robust smoothing — use 1% of width for strong noise reduction
     k_size = max(7, int(w * 0.01))
     kernel = np.ones(k_size) / k_size
     white_smooth = np.convolve(white_ratio, kernel, mode='same')
     
-    # Skip column splitting for the first page (Cover Page) if it looks like a cover
-    # Only match actual page-0 naming patterns from OCR pipeline (page_xxx_0.png)
-    # NOT DOCX preview files (DOCX_FULL_xxx_0.jpg, DOCX_xxx_0.jpg)
     basename = os.path.basename(image_path).lower()
     is_docx_preview = basename.startswith("docx_")
     is_cover = (not is_docx_preview) and (
@@ -114,86 +198,48 @@ def split_columns_simple(image_path, filename_base, output_dir):
         basename.endswith("_0.jpg") or 
         "cover" in basename
     )
-    if is_cover:
-        # For cover pages, use an even stricter gap requirement (5%)
-        min_gap_width_current = int(w * 0.05) 
-        gap_threshold_current = 0.98  # Very white
-        is_gap_current = white_smooth > gap_threshold_current
-        
-        # Find contiguous gap segments (cover page only)
-        gaps = []
-        in_gap = False
-        gap_start = 0
-        for x in range(w):
-            if is_gap_current[x] and not in_gap:
-                gap_start = x
-                in_gap = True
-            elif not is_gap_current[x] and in_gap:
-                gap_width = x - gap_start
-                if gap_width >= min_gap_width_current:
-                    gap_center = gap_start + gap_width // 2
-                    if gap_center > w * 0.05 and gap_center < w * 0.95:
-                        gaps.append(gap_center)
-                in_gap = False
-    else:
-        # ── Multi-pass gap detection: strict → lenient ──
-        # Real column gutters are consistently white (>95%) through the full page height.
-        # False positives from margins, indented text, etc only appear at lower thresholds.
-        # Start strict and work down — first valid result wins.
-        gaps = []
-        pass_configs = [
-            # (threshold, min_gap_width_pct, description)
-            (0.95, 0.02, "strict"),    # Real column gutters: >95% white, >2% page width
-            (0.90, 0.015, "medium"),   # Slightly less strict
-            (0.85, 0.012, "lenient"),  # More tolerant
-        ]
-        
-        for pass_thresh, pass_min_pct, pass_desc in pass_configs:
-            is_gap_pass = white_smooth > pass_thresh
-            min_gap_w = max(10, int(w * pass_min_pct))
-            
-            pass_gaps = []
-            in_gap = False
-            gap_start = 0
-            for x in range(w):
-                if is_gap_pass[x] and not in_gap:
-                    gap_start = x
-                    in_gap = True
-                elif not is_gap_pass[x] and in_gap:
-                    gap_width = x - gap_start
-                    if gap_width >= min_gap_w:
-                        gap_center = gap_start + gap_width // 2
-                        if gap_center > w * 0.05 and gap_center < w * 0.95:
-                            pass_gaps.append(gap_center)
-                    in_gap = False
-            
-            if pass_gaps:
-                # Filter close gaps
-                pass_gaps.sort()
-                filtered = [pass_gaps[0]]
-                for g in pass_gaps[1:]:
-                    if g - filtered[-1] > w * 0.15:
-                        filtered.append(g)
-                
-                num_found = len(filtered) + 1
-                if 2 <= num_found <= 4:
-                    gaps = filtered
-                    logger.info(f"   Column detection pass '{pass_desc}' (thresh={pass_thresh}, minW={min_gap_w}px): found {num_found} cols, gaps at {gaps}")
-                    break  # Use first valid result
     
+    if is_cover:
+        # Cover pages: stricter gap requirement
+        min_gap_width = int(w * 0.05) 
+        gap_threshold = 0.98
+    else:
+        # Standard pages: 90% white threshold, 2.0% minimum gap width
+        min_gap_width = max(15, int(w * 0.02))
+        gap_threshold = 0.90
+        
+    is_gap = white_smooth > gap_threshold
+    
+    gaps = []
+    in_gap = False
+    gap_start = 0
+    # Max gap width: real column gutters are narrow (30-200px). Margins/tables are much wider.
+    max_gap_w = max(200, int(w * 0.12))
+    
+    for x in range(w):
+        if is_gap[x] and not in_gap:
+            gap_start = x
+            in_gap = True
+        elif not is_gap[x] and in_gap:
+            gap_width = x - gap_start
+            if gap_width >= min_gap_width and gap_width <= max_gap_w:
+                gap_center = gap_start + gap_width // 2
+                # Ignore gaps too close to edges (must be in central 80%)
+                if gap_center > w * 0.10 and gap_center < w * 0.90:
+                    gaps.append((gap_center, gap_width))
+            in_gap = False
+            
     if not gaps:
         return [image_path]
-    
-    # Filter gaps that are too close to each other (less than 15% of width)
+        
+    # Filter gaps that are too close to each other
     # Each column should be at least 15% of the page width
-    filtered_gaps = []
-    if gaps:
-        gaps.sort()
-        filtered_gaps.append(gaps[0])
-        for g in gaps[1:]:
-            if g - filtered_gaps[-1] > w * 0.15:
-                filtered_gaps.append(g)
-    
+    gaps.sort(key=lambda g: g[0])
+    filtered_gaps = [gaps[0][0]]
+    for g_center, g_width in gaps[1:]:
+        if g_center - filtered_gaps[-1] > w * 0.15:
+            filtered_gaps.append(g_center)
+            
     gaps = filtered_gaps
     
     # Build column boundaries
@@ -207,20 +253,20 @@ def split_columns_simple(image_path, filename_base, output_dir):
         for i in range(num_cols):
             cw = col_boundaries[i+1] - col_boundaries[i]
             col_widths.append(cw)
-            if cw > w * 0.10:  # Column must be at least 10% of page
+            if cw > w * 0.12:  # Column must be at least 12% of page
                 valid_cols.append(i)
         
         if len(valid_cols) < 2:
-            logger.info("Column split: candidates found but too narrow/unbalanced, defaulting to single column")
+            logger.info("Column split: candidates found but too narrow, defaulting to single column")
             return [image_path]
         
         # Balance check: widest valid column shouldn't be >3x the narrowest valid
         valid_widths = [col_widths[i] for i in valid_cols]
-        if max(valid_widths) > 3 * min(valid_widths):
+        if max(valid_widths) > 3.0 * min(valid_widths):
             logger.info(f"Column split: unbalanced widths {[int(cw) for cw in col_widths]}, defaulting to single column")
             return [image_path]
  
-    # Sanity: max 4 columns (manual books can have 4 columns)
+    # Sanity: max 4 columns
     if num_cols > 4:
         logger.warning(f"Too many columns detected ({num_cols}), capping at 4")
         gaps = gaps[:3]
@@ -235,7 +281,7 @@ def split_columns_simple(image_path, filename_base, output_dir):
         col_x1 = int(col_boundaries[col_idx])
         col_x2 = int(col_boundaries[col_idx + 1])
         
-        # Small padding
+        # Small padding to avoid cutting text at edges
         pad = max(5, int(w * 0.005))
         col_x1 = max(0, col_x1 - pad)
         col_x2 = min(w, col_x2 + pad)
@@ -250,3 +296,4 @@ def split_columns_simple(image_path, filename_base, output_dir):
         return [image_path]
     
     return column_paths
+

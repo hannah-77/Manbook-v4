@@ -6,7 +6,7 @@ echo.
 
 :: Start Backend (new window)
 echo [1/2] Starting Backend (Python)...
-start "Manbook Backend" cmd /k "cd /d %~dp0backend && call venv311\Scripts\activate && python main.py"
+start "Manbook Backend" cmd /k "cd /d %~dp0backend && venv311\Scripts\python.exe main.py"
 
 :: Wait for backend to initialize
 timeout /t 3 /nobreak > nul

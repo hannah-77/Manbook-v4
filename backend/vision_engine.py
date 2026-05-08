@@ -909,11 +909,19 @@ Output ONLY the JSON array, nothing else."""
         from image_processing import remove_watermarks_and_enhance
         enhanced = remove_watermarks_and_enhance(original_img)
         if enhanced is not None:
-            # Update image_path with enhanced version
-            enhanced_path = image_path.replace(".png", "_enhanced.png").replace(".jpg", "_enhanced.jpg")
-            cv2.imwrite(enhanced_path, enhanced)
-            image_path = enhanced_path
-            original_img = enhanced
+            # SAFETY CHECK: Verify the enhanced image is NOT blank
+            # If >95% of pixels are white, the enhancement destroyed the content
+            gray_check = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            white_pct = np.sum(gray_check > 240) / (gray_check.shape[0] * gray_check.shape[1])
+            if white_pct > 0.95:
+                logger.warning(f"⚠️ Enhanced image is {white_pct:.0%} white — discarding (content was destroyed)")
+                # Do NOT update image_path or original_img
+            else:
+                # Update image_path with enhanced version
+                enhanced_path = image_path.replace(".png", "_enhanced.png").replace(".jpg", "_enhanced.jpg")
+                cv2.imwrite(enhanced_path, enhanced)
+                image_path = enhanced_path
+                original_img = enhanced
         # --------------------------------------
 
         h, w = original_img.shape[:2]
@@ -1070,7 +1078,18 @@ Output ONLY the JSON array, nothing else."""
             
             try:
                 # ⚠️ BUG FIX: Use ocr_img (upscaled) instead of original_img for better OCR accuracy
+                logger.info(f"🔎 PaddleOCR: Running on image {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
                 full_page_result = self.ocr_engine.ocr(ocr_img, cls=False)
+
+                # Diagnostic: log raw OCR result type
+                if full_page_result is None:
+                    logger.warning(f"⚠️ PaddleOCR returned None!")
+                elif not full_page_result:
+                    logger.warning(f"⚠️ PaddleOCR returned empty list!")
+                elif full_page_result[0] is None:
+                    logger.warning(f"⚠️ PaddleOCR returned [None]!")
+                else:
+                    logger.info(f"✅ PaddleOCR found {len(full_page_result[0])} raw lines")
 
                 if full_page_result and full_page_result[0]:
                     # Collect all text lines with their positions
@@ -1194,7 +1213,9 @@ Output ONLY the JSON array, nothing else."""
                         )
 
             except Exception as e:
+                import traceback
                 logger.error(f"Full-page OCR failed: {e}")
+                logger.error(f"OCR traceback: {traceback.format_exc()}")
 
             # ── Auto-filter Headers and Footers ──
             # Ignore elements whose center is in the top 6% or bottom 6% of the image (typical header/footer zones)
@@ -1407,6 +1428,7 @@ Output ONLY the JSON array, nothing else."""
             })
 
         logger.info(f"✅ Hybrid scan complete: {len(final_elements)} elements")
+        print(f"      📊 scan_document({os.path.basename(image_path)}): {len(final_elements)} elements found")
         # ── Final Cleanup & Scaling ──
         # Scale everything back to original_img coordinates before returning
         if ocr_scale != 1.0:
