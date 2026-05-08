@@ -12,7 +12,7 @@ timeout /t 3 /nobreak > nul
 
 :: Start Frontend with Flutter Hot-Reload
 echo [2/2] Starting Frontend (Hot-Reload enabled)...
-start "Manbook Frontend DEV" cmd /k "cd /d %~dp0frontend && flutter run -d windows"
+start "Manbook Frontend DEV" cmd /k "cd /d %~dp0frontend && "C:\flutter\bin\flutter.bat" run -d windows"
 
 echo.
 echo ==========================================

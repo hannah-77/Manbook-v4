@@ -84,6 +84,43 @@ def apply_text_correction_with_highlights(text: str, lang: str = 'id') -> dict:
         return _ocr_correct_hl(text, lang=lang)
     return {'text': text, 'highlights': []}
 
+
+def convert_word_to_pdf(source_path: str, output_path: str):
+    """Convert Word document to PDF using Word automation.
+
+    This helper tries docx2pdf first, then falls back to direct Word COM if needed.
+    It supports UNC paths and does not require moving the file locally.
+    """
+    import pythoncom
+    import win32com.client
+
+    source_path = os.path.normpath(source_path)
+    output_path = os.path.normpath(output_path)
+
+    try:
+        pythoncom.CoInitialize()
+        from docx2pdf import convert
+        convert(source_path, output_path)
+        return
+    except Exception as e:
+        logger.warning(f"docx2pdf.convert failed for {source_path}: {e}. Trying direct Word COM fallback.")
+
+    try:
+        pythoncom.CoInitialize()
+        word = win32com.client.Dispatch('Word.Application')
+        word.Visible = False
+        word.DisplayAlerts = 0
+        doc = word.Documents.Open(source_path, ReadOnly=True, AddToRecentFiles=False)
+        doc.SaveAs2(output_path, FileFormat=17)
+        doc.Close(False)
+        word.Quit()
+    except Exception as e:
+        try:
+            word.Quit()
+        except Exception:
+            pass
+        raise
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -1278,12 +1315,9 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 "message": "Converting .doc to PDF...",
                 "percentage": 10,
             })
-            from docx2pdf import convert
             pdf_path = temp_path + ".pdf"
             try:
-                import pythoncom
-                pythoncom.CoInitialize()
-                convert(temp_path, pdf_path)
+                convert_word_to_pdf(temp_path, pdf_path)
                 temp_path = pdf_path
                 fname_lower = fname_lower + ".pdf"
             except Exception as e:
@@ -1298,12 +1332,9 @@ async def process_workflow(request: Request, file: UploadFile = File(...)):
                 "message": "Converting Word to PDF for OCR fallback...",
                 "percentage": 10,
             })
-            from docx2pdf import convert
             pdf_path = temp_path + ".pdf"
             try:
-                import pythoncom
-                pythoncom.CoInitialize()
-                convert(temp_path, pdf_path)
+                convert_word_to_pdf(temp_path, pdf_path)
                 temp_path = pdf_path
                 fname_lower = fname_lower + ".pdf"
             except Exception as e:

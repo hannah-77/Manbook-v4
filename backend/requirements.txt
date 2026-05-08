@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 paddleocr==2.8.1
-paddlepaddle-gpu==2.6.2
+paddlepaddle==3.0.0
 rapidfuzz
 python-multipart
 pandas
