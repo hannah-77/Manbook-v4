@@ -115,9 +115,9 @@ except ImportError:
     TEXT_CORRECTOR_AVAILABLE = False
     logger.warning("⚠️ text_corrector not available — OCR correction disabled")
 
-# Configure Logging
+# Configure Logging — use 'BioManual' logger so output goes to backend.log
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BioManual")
 
 # Initialize OpenRouter (for chapter classification only)
 openrouter = get_openrouter_client()
@@ -893,6 +893,7 @@ Output ONLY the JSON array, nothing else."""
           {"elements": [...], "clean_image_path": str}
         """
         logger.info(f"🔍 Scanning: {os.path.basename(image_path)}")
+        print(f"      🔍 scan_document START: {os.path.basename(image_path)}")
 
         # Setup output directory
         backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -902,8 +903,11 @@ Output ONLY the JSON array, nothing else."""
         # Stage 1: Load and Optimize
         original_img = cv2.imread(image_path)
         if original_img is None:
-            logger.error(f"Failed to load image: {image_path}")
+            logger.error(f"❌ Failed to load image: {image_path}")
+            print(f"      ❌ FAILED to load image: {image_path}")
             return {"elements": [], "clean_image_path": None}
+        
+        print(f"      ✓ Image loaded: {original_img.shape[1]}x{original_img.shape[0]}")
         
         # --- WATERMARK REMOVAL & ENHANCEMENT ---
         from image_processing import remove_watermarks_and_enhance
@@ -954,7 +958,9 @@ Output ONLY the JSON array, nothing else."""
 
         # ── STAGE 1: Layout Detection ─────────────────────────────
         logger.info("📐 Stage 1: Layout detection (Surya)...")
+        print(f"      📐 Stage 1: Surya layout on {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
         regions = self._detect_layout(ocr_img)   # Gunakan ocr_img (sudah upscale jika perlu)
+        print(f"      📐 Stage 1 result: {len(regions)} regions")
 
         # NOTE: We keep regions in UPSCALED coordinates for now 
         # so they match ocr_img during Stage 2 processing.
@@ -963,6 +969,7 @@ Output ONLY the JSON array, nothing else."""
         # Fallback: if Surya finds nothing, OCR the full page
         if not regions:
             logger.warning("⚠️ No layout regions detected — OCR-ing full page")
+            print(f"      ⚠️ No layout regions! Falling back to full page OCR")
             regions = [{"type": "paragraph", "bbox": [0, 0, w, h]}]
 
         # NOTE: Visual-box heuristic is applied inside _detect_layout()
@@ -1079,17 +1086,22 @@ Output ONLY the JSON array, nothing else."""
             try:
                 # ⚠️ BUG FIX: Use ocr_img (upscaled) instead of original_img for better OCR accuracy
                 logger.info(f"🔎 PaddleOCR: Running on image {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
+                print(f"      🔎 PaddleOCR: Running on {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
                 full_page_result = self.ocr_engine.ocr(ocr_img, cls=False)
 
                 # Diagnostic: log raw OCR result type
                 if full_page_result is None:
                     logger.warning(f"⚠️ PaddleOCR returned None!")
+                    print(f"      ⚠️ PaddleOCR returned None!")
                 elif not full_page_result:
                     logger.warning(f"⚠️ PaddleOCR returned empty list!")
+                    print(f"      ⚠️ PaddleOCR returned empty list!")
                 elif full_page_result[0] is None:
                     logger.warning(f"⚠️ PaddleOCR returned [None]!")
+                    print(f"      ⚠️ PaddleOCR returned [None]!")
                 else:
                     logger.info(f"✅ PaddleOCR found {len(full_page_result[0])} raw lines")
+                    print(f"      ✅ PaddleOCR found {len(full_page_result[0])} raw lines")
 
                 if full_page_result and full_page_result[0]:
                     # Collect all text lines with their positions
@@ -1219,13 +1231,23 @@ Output ONLY the JSON array, nothing else."""
 
             # ── Auto-filter Headers and Footers ──
             # Ignore elements whose center is in the top 6% or bottom 6% of the image (typical header/footer zones)
+            # IMPORTANT: Use ocr_img height for filtering since bboxes are in ocr_img coordinates
+            ocr_h = ocr_img.shape[0]
             filtered_elements = []
-            header_margin = h * 0.06
-            footer_margin = h * 0.94
+            header_margin = ocr_h * 0.06
+            footer_margin = ocr_h * 0.94
+            pre_filter_count = len(elements)
             for e in elements:
                 y_center = (e['bbox'][1] + e['bbox'][3]) / 2
                 if header_margin < y_center < footer_margin:
                     filtered_elements.append(e)
+            
+            if pre_filter_count > 0 and len(filtered_elements) == 0:
+                logger.warning(f"⚠️ Header/footer filter removed ALL {pre_filter_count} elements! Using unfiltered.")
+                print(f"      ⚠️ Header/footer filter killed all {pre_filter_count} elements! Reverting.")
+                filtered_elements = elements  # Revert — don't lose everything
+            elif pre_filter_count > len(filtered_elements):
+                logger.info(f"Header/footer filter: {pre_filter_count} → {len(filtered_elements)} elements")
             
             elements = filtered_elements
 
@@ -1393,6 +1415,8 @@ Output ONLY the JSON array, nothing else."""
                 logger.info("ℹ️ AI classification disabled (AI_VISION_OCR_ENABLED=false)")
 
         # ── STAGE 4: Crop Visual Elements ─────────────────────────
+        print(f"      📦 Stage 4: {len(elements)} elements to process for crops")
+        logger.info(f"📦 Stage 4: Processing {len(elements)} elements for visual cropping")
         final_elements = []
         for idx, elem in enumerate(elements):
             crop_url = None

@@ -26,71 +26,63 @@ def _is_watermark(text: str) -> bool:
     return False
 
 def convert_pdf_to_images_safe(path, dpi=300, max_pages=None):
-    from pdf2image import convert_from_path
-    import PyPDF2
+    """
+    Convert PDF to a list of PIL Images using PyMuPDF (fitz).
+    This is much more reliable than pdf2image (poppler) and handles DRM
+    and complex vectors better without generating blank pages.
+    """
+    import fitz
+    from PIL import Image as PILImage
+    import gc
     
-    poppler = os.environ.get('POPPLER_PATH')
-    if not poppler:
-         for p in [r"C:\poppler\Library\bin", r"C:\poppler\bin"]:
-             if os.path.exists(p):
-                 poppler = p
-                 break
+    # Calculate scale factor for requested DPI (72 dpi is the default)
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
     
-    base_params = {'dpi': dpi}
-    if poppler:
-        base_params['poppler_path'] = poppler
-
-    # Determine total page count
-    try:
-        with open(path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            total_pages = len(reader.pages)
-    except Exception:
-        total_pages = None  # Unknown, will use single call
-    
-    if max_pages:
-        if total_pages:
-            total_pages = min(total_pages, max_pages)
-        else:
-            total_pages = max_pages
-    
-    # ── Batch processing: convert pages in chunks to avoid OOM ──
-    # Each page at 300dpi ≈ 25MB RAM. 20 pages ≈ 500MB per batch.
-    BATCH_SIZE = 20
-    
-    def _convert(params):
-        try:
-            return convert_from_path(path, **params)
-        except Exception:
-            # Retry without poppler_path (maybe it's in PATH)
-            params_copy = {k: v for k, v in params.items() if k != 'poppler_path'}
-            return convert_from_path(path, **params_copy)
-    
-    # Small PDFs: single call (unchanged behavior)
-    if total_pages is None or total_pages <= BATCH_SIZE:
-        params = dict(base_params)
-        if max_pages:
-            params['last_page'] = max_pages
-        return _convert(params)
-    
-    # Large PDFs: batch processing
     all_images = []
-    for start in range(0, total_pages, BATCH_SIZE):
-        end = min(start + BATCH_SIZE, total_pages)
-        params = dict(base_params)
-        params['first_page'] = start + 1  # 1-indexed
-        params['last_page'] = end
-        
-        batch_images = _convert(params)
-        all_images.extend(batch_images)
-        
-        logger.info(f"📄 PDF→Images: batch {start+1}-{end}/{total_pages} ({len(batch_images)} pages)")
-        
-        # Free memory between batches
-        import gc
-        gc.collect()
     
-    return all_images
+    try:
+        doc = fitz.open(path)
+        total_pages = len(doc)
+        
+        if max_pages and total_pages > max_pages:
+            total_pages = max_pages
+            
+        logger.info(f"📄 PDF→Images: processing {total_pages} pages at {dpi} DPI using PyMuPDF")
+        
+        for i in range(total_pages):
+            page = doc[i]
+            # Render page to a pixmap
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            
+            # Convert fitz pixmap to PIL Image
+            if pix.colorspace and pix.colorspace.n == 4:
+                # CMYK to RGB
+                mode = "CMYK"
+            elif pix.alpha:
+                mode = "RGBA"
+            else:
+                mode = "RGB"
+                
+            img = PILImage.frombytes(mode, [pix.width, pix.height], pix.samples)
+            
+            # Ensure it's always RGB for OCR/OpenCV
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+                
+            all_images.append(img)
+            
+            # Free memory periodically
+            if i % 10 == 0:
+                gc.collect()
+                
+        doc.close()
+        return all_images
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to convert PDF to images via PyMuPDF: {e}")
+        # Return empty list or raise
+        return []
 
 def remove_watermarks_and_enhance(image_cv):
     """
