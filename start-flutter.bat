@@ -25,6 +25,6 @@ echo.
 echo Starting Flutter app...
 echo.
 
-flutter run
+flutter run -d windows
 
 pause

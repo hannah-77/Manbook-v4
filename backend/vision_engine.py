@@ -48,6 +48,11 @@ if not hasattr(np, 'sctypes'):
 # Surya Layout Detection (replaces PPStructure)
 try:
     import torch  # Pre-load torch DLLs safely
+
+    # Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("BioVisionHybrid Device:", device)
+
     from PIL import Image as PILImage
     from surya.foundation import FoundationPredictor
     from surya.layout import LayoutPredictor
@@ -56,6 +61,7 @@ try:
 except ImportError as _surya_err:
     SURYA_AVAILABLE = False
     logging.warning(f"⚠️ Surya not available: {_surya_err}. Layout detection will be limited.")
+
 
 from paddleocr import PaddleOCR
 from dotenv import load_dotenv
@@ -109,9 +115,9 @@ except ImportError:
     TEXT_CORRECTOR_AVAILABLE = False
     logger.warning("⚠️ text_corrector not available — OCR correction disabled")
 
-# Configure Logging
+# Configure Logging — use 'BioManual' logger so output goes to backend.log
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BioManual")
 
 # Initialize OpenRouter (for chapter classification only)
 openrouter = get_openrouter_client()
@@ -133,11 +139,23 @@ class BioVisionHybrid:
         """
         # ── Stage 1: Surya Layout Engine ──
         if SURYA_AVAILABLE:
-            logger.info("Initializing Surya Layout Predictor...")
+            logger.info(f"Initializing Surya Layout Predictor on {device}...")
             self._surya_foundation = FoundationPredictor(
                 checkpoint=surya_settings.LAYOUT_MODEL_CHECKPOINT
             )
+            
+            # Pindahkan model foundation ke GPU
+            if hasattr(self._surya_foundation, 'model'):
+                self._surya_foundation.model = self._surya_foundation.model.to(device)
+            elif hasattr(self._surya_foundation, 'processor'):
+                pass # processor doesn't use device
+                
             self.layout_engine = LayoutPredictor(self._surya_foundation)
+            
+            # Pindahkan model layout_engine ke GPU
+            if hasattr(self.layout_engine, 'model'):
+                self.layout_engine.model = self.layout_engine.model.to(device)
+                
             logger.info("✓ Surya Layout Predictor: Ready")
         else:
             logger.warning("⚠️ Surya not available — layout detection will be limited")
@@ -311,17 +329,36 @@ class BioVisionHybrid:
             white_pixels = np.sum(gray > 220)
             white_ratio = white_pixels / (ch * cw)
 
-            # Visual content: high edges + either colorful or not mostly white
+            # 3b. Dark ratio: heading banners have >50% dark pixels
+            dark_pixels = np.sum(gray < 50)
+            dark_ratio = dark_pixels / (ch * cw)
+
+            # SPECIAL: Dark-background text blocks (e.g. "User Notice" on black bg)
+            # These are boxes with mostly dark pixels — if they lack color variance, they are NOT visual content
+            if dark_ratio > 0.40 and color_var < 20:
+                logger.debug(
+                    f"VisualCheck bbox={bbox}: DARK TEXT BLOCK detected "
+                    f"(dark_ratio={dark_ratio:.2f}, color_var={color_var:.1f}) -> NOT visual"
+                )
+                return False
+
+            # 4. Non-white pixel ratio: photos/diagrams have colored pixels
+            #    that are neither white (>220) nor black text (<50)
+            colored_pixels = np.sum((gray > 50) & (gray < 220))
+            colored_ratio = colored_pixels / (ch * cw)
+
+            # Visual content: multiple heuristics (relaxed to catch product photos on white bg)
             is_visual = (
-                (edge_ratio > 0.08 and white_ratio < 0.65)  # Dense edges, not plain text
-                or (color_var > 30)                           # Colorful content
-                or (edge_ratio > 0.12)                        # Very high edge density (diagrams)
+                (edge_ratio > 0.06 and white_ratio < 0.80)  # Edges + not all-white
+                or (color_var > 15)                           # Any significant color (yellow device etc.)
+                or (edge_ratio > 0.08)                        # Moderate edge density (diagrams)
+                or (colored_ratio > 0.05 and white_ratio < 0.90)  # Has colored content (product photos)
             )
 
             logger.debug(
                 f"VisualCheck bbox={bbox}: edge_ratio={edge_ratio:.3f}, "
                 f"color_var={color_var:.1f}, white_ratio={white_ratio:.2f}, "
-                f"is_visual={is_visual}"
+                f"colored_ratio={colored_ratio:.3f}, is_visual={is_visual}"
             )
             return is_visual
 
@@ -428,7 +465,35 @@ class BioVisionHybrid:
                 label_counts[label] = label_counts.get(label, 0) + 1
 
                 # Validate: if Surya says 'figure', check if it's actually visual content
-                # Many false positives: Surya labels caption text ("Figure 11") as 'figure'
+                # Only override for SMALL regions — for larger ones, trust Surya's ML model
+                if rtype == 'figure':
+                    region_w = x2 - x1
+                    region_h = y2 - y1
+
+                    # DARK BOX CHECK: Dark strips or boxes are often text blocks
+                    # e.g. "User Notice", "WARNING" with black/dark background
+                    fig_crop = image_cv[max(0,y1):min(image_cv.shape[0],y2), 
+                                        max(0,x1):min(image_cv.shape[1],x2)]
+                    if fig_crop.size > 0:
+                        fig_gray = cv2.cvtColor(fig_crop, cv2.COLOR_BGR2GRAY)
+                        fig_dark = np.sum(fig_gray < 80) / (fig_crop.shape[0] * fig_crop.shape[1])
+                        
+                        # Check color variance to ensure it's not a dark product photo
+                        hsv = cv2.cvtColor(fig_crop, cv2.COLOR_BGR2HSV)
+                        color_var = float(np.std(hsv[:, :, 1]))
+                        
+                        # If it's very dark and lacks vibrant colors, it's a text box, not a figure
+                        if fig_dark > 0.40 and color_var < 20:
+                            fig_aspect = region_w / max(region_h, 1)
+                            # Wide banners = heading, tall boxes = paragraph
+                            new_type = 'heading' if fig_aspect > 2.5 else 'paragraph'
+                            logger.info(
+                                f"🏷️ Dark text block detected ({region_w}x{region_h}, "
+                                f"{fig_dark:.0%} dark), reclassifying figure->{new_type}: "
+                                f"bbox=[{x1},{y1},{x2},{y2}]"
+                            )
+                            rtype = new_type
+
                 if rtype == 'figure':
                     region_w = x2 - x1
                     region_h = y2 - y1
@@ -439,13 +504,17 @@ class BioVisionHybrid:
                             f"bbox=[{x1},{y1},{x2},{y2}]"
                         )
                         rtype = 'paragraph'
-                    # Check if region has actual visual content (not just text on white)
-                    elif not self._is_visual_content(image_cv, [x1, y1, x2, y2]):
-                        logger.debug(
-                            f"Figure region has no visual content, reclassifying as paragraph: "
-                            f"bbox=[{x1},{y1},{x2},{y2}]"
-                        )
-                        rtype = 'paragraph'
+                    # Medium-sized regions: check visual content but trust Surya for larger ones
+                    elif region_w < 150 and region_h < 150:
+                        if not self._is_visual_content(image_cv, [x1, y1, x2, y2]):
+                            logger.debug(
+                                f"Small figure region has no visual content, reclassifying as paragraph: "
+                                f"bbox=[{x1},{y1},{x2},{y2}]"
+                            )
+                            rtype = 'paragraph'
+                    # Large regions (≥150px both dims): trust Surya's ML classification
+                    # Surya is trained on document layouts and is more reliable than
+                    # simple edge/color heuristics for product photos on white backgrounds
 
                 regions.append({
                     "type": rtype,
@@ -535,15 +604,26 @@ class BioVisionHybrid:
         try:
             h, w = crop.shape[:2]
 
+            # 0. DARK BACKGROUND INVERSION: If the crop has a mostly dark background
+            #    (like heading banners with white text on black), invert colors so
+            #    OCR can read the text properly (OCR is optimized for dark-on-light)
+            gray_check = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            dark_pixels = np.sum(gray_check < 80)
+            dark_ratio = dark_pixels / (h * w)
+            if dark_ratio > 0.40:
+                logger.debug(f"Dark background detected ({dark_ratio:.0%} dark), inverting for OCR")
+                clean = cv2.bitwise_not(crop)
+            else:
+                clean = crop.copy()
+
             # 1. Remove red/pink watermarks using HSV color masking
-            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(clean, cv2.COLOR_BGR2HSV)
             mask1 = cv2.inRange(hsv, np.array([0,  30,  30]), np.array([10,  255, 255]))
             mask2 = cv2.inRange(hsv, np.array([160, 30, 30]), np.array([180, 255, 255]))
             mask3 = cv2.inRange(hsv, np.array([10,  50, 50]), np.array([25,  255, 255]))
             watermark_mask = mask1 + mask2 + mask3
             kernel = np.ones((3, 3), np.uint8)
             watermark_mask = cv2.dilate(watermark_mask, kernel, iterations=2)
-            clean = crop.copy()
             clean[watermark_mask > 0] = (255, 255, 255)
 
             # 2. Denoise (bilateral: preserves edges, removes noise)
@@ -775,11 +855,12 @@ Output ONLY the JSON array, nothing else."""
             # TEXT-ONLY call — no image_base64!
             response = openrouter.call(prompt, timeout=30)
             if not response:
+                logger.warning("AI classification: API returned empty response")
                 return None
 
             json_match = re.search(r'\[.*\]', response, re.DOTALL)
             if not json_match:
-                logger.warning("AI classification: no JSON array found in response")
+                logger.warning(f"AI classification: no JSON array found in response: {response[:100]}...")
                 return None
 
             results = json.loads(json_match.group())
@@ -812,25 +893,47 @@ Output ONLY the JSON array, nothing else."""
           {"elements": [...], "clean_image_path": str}
         """
         logger.info(f"🔍 Scanning: {os.path.basename(image_path)}")
+        print(f"      🔍 scan_document START: {os.path.basename(image_path)}")
 
         # Setup output directory
         backend_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(backend_dir, "output_results")
         os.makedirs(output_dir, exist_ok=True)
 
-        # Load image
+        # Stage 1: Load and Optimize
         original_img = cv2.imread(image_path)
         if original_img is None:
-            logger.error(f"Failed to load image: {image_path}")
+            logger.error(f"❌ Failed to load image: {image_path}")
+            print(f"      ❌ FAILED to load image: {image_path}")
             return {"elements": [], "clean_image_path": None}
+        
+        print(f"      ✓ Image loaded: {original_img.shape[1]}x{original_img.shape[0]}")
+        
+        # --- WATERMARK REMOVAL & ENHANCEMENT ---
+        from image_processing import remove_watermarks_and_enhance
+        enhanced = remove_watermarks_and_enhance(original_img)
+        if enhanced is not None:
+            # SAFETY CHECK: Verify the enhanced image is NOT blank
+            # If >95% of pixels are white, the enhancement destroyed the content
+            gray_check = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            white_pct = np.sum(gray_check > 240) / (gray_check.shape[0] * gray_check.shape[1])
+            if white_pct > 0.95:
+                logger.warning(f"⚠️ Enhanced image is {white_pct:.0%} white — discarding (content was destroyed)")
+                # Do NOT update image_path or original_img
+            else:
+                # Update image_path with enhanced version
+                enhanced_path = image_path.replace(".png", "_enhanced.png").replace(".jpg", "_enhanced.jpg")
+                cv2.imwrite(enhanced_path, enhanced)
+                image_path = enhanced_path
+                original_img = enhanced
+        # --------------------------------------
 
         h, w = original_img.shape[:2]
 
         # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
         # Dokumen yang di-scan dengan resolusi rendah sering menghasilkan
         # teks blur yang tidak bisa dibaca oleh OCR manapun.
-        # ── Auto-upscale: jika resolusi gambar terlalu kecil, OCR akan sulit ──
-        # Diturunkan ambang batasnya menjadi 1200, atau dimatikan sebagian jika fast_mode
+
         ocr_img = original_img   # Gambar yang dipakai untuk OCR (bisa berbeda dari preview)
         ocr_scale = 1.0
         upscale_threshold = 1000 if fast_mode else 1200
@@ -855,16 +958,18 @@ Output ONLY the JSON array, nothing else."""
 
         # ── STAGE 1: Layout Detection ─────────────────────────────
         logger.info("📐 Stage 1: Layout detection (Surya)...")
+        print(f"      📐 Stage 1: Surya layout on {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
         regions = self._detect_layout(ocr_img)   # Gunakan ocr_img (sudah upscale jika perlu)
+        print(f"      📐 Stage 1 result: {len(regions)} regions")
 
-        # Scale-down bbox jika gambar di-upscale agar bbox sesuai original_img
-        if ocr_scale != 1.0:
-            for r in regions:
-                r['bbox'] = [int(v / ocr_scale) for v in r['bbox']]
+        # NOTE: We keep regions in UPSCALED coordinates for now 
+        # so they match ocr_img during Stage 2 processing.
+        # We will scale them back to original size at the very end.
 
         # Fallback: if Surya finds nothing, OCR the full page
         if not regions:
             logger.warning("⚠️ No layout regions detected — OCR-ing full page")
+            print(f"      ⚠️ No layout regions! Falling back to full page OCR")
             regions = [{"type": "paragraph", "bbox": [0, 0, w, h]}]
 
         # NOTE: Visual-box heuristic is applied inside _detect_layout()
@@ -898,10 +1003,10 @@ Output ONLY the JSON array, nothing else."""
                     
                     # Direct Translate Region
                     x1, y1, x2, y2 = bbox
-                    pad = 10
+                    pad = int(10 * ocr_scale)
                     px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
-                    px2, py2 = min(w, x2 + pad), min(h, y2 + pad)
-                    crop_visual = original_img[py1:py2, px1:px2]
+                    px2, py2 = min(ocr_img.shape[1], x2 + pad), min(ocr_img.shape[0], y2 + pad)
+                    crop_visual = ocr_img[py1:py2, px1:px2]
                     
                     if crop_visual.size > 0:
                         _, buffer = cv2.imencode('.jpg', crop_visual)
@@ -958,8 +1063,45 @@ Output ONLY the JSON array, nothing else."""
             # ── 2B: Full-page OCR for ALL text ──
             # This replaces both the old per-region OCR (Stage 2) and orphan recovery (Stage 2.5)
             text_line_count = 0
+            
+            # INVERT DARK REGIONS PRE-OCR: PaddleOCR struggles with white-on-black text
+            # We invert dark regions (like "User Notice" boxes) in-place on the image 
+            # so the text becomes black-on-white and easily readable.
+            for region in regions:
+                if region['type'] in ('heading', 'paragraph'):
+                    rx1, ry1, rx2, ry2 = region['bbox']
+                    pad = int(5 * ocr_scale)
+                    px1, py1 = max(0, rx1 - pad), max(0, ry1 - pad)
+                    px2, py2 = min(ocr_img.shape[1], rx2 + pad), min(ocr_img.shape[0], ry2 + pad)
+                    
+                    crop = ocr_img[py1:py2, px1:px2]
+                    if crop.size > 0:
+                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        dark_ratio = np.sum(gray < 80) / (crop.shape[0] * crop.shape[1])
+                        if dark_ratio > 0.40:
+                            # Invert the region in-place on ocr_img
+                            ocr_img[py1:py2, px1:px2] = cv2.bitwise_not(crop)
+                            logger.info(f"🔄 Inverted dark region before OCR: [{rx1},{ry1},{rx2},{ry2}] (dark_ratio={dark_ratio:.2f})")
+            
             try:
-                full_page_result = self.ocr_engine.ocr(original_img, cls=False)
+                # ⚠️ BUG FIX: Use ocr_img (upscaled) instead of original_img for better OCR accuracy
+                logger.info(f"🔎 PaddleOCR: Running on image {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
+                print(f"      🔎 PaddleOCR: Running on {ocr_img.shape[1]}x{ocr_img.shape[0]}...")
+                full_page_result = self.ocr_engine.ocr(ocr_img, cls=False)
+
+                # Diagnostic: log raw OCR result type
+                if full_page_result is None:
+                    logger.warning(f"⚠️ PaddleOCR returned None!")
+                    print(f"      ⚠️ PaddleOCR returned None!")
+                elif not full_page_result:
+                    logger.warning(f"⚠️ PaddleOCR returned empty list!")
+                    print(f"      ⚠️ PaddleOCR returned empty list!")
+                elif full_page_result[0] is None:
+                    logger.warning(f"⚠️ PaddleOCR returned [None]!")
+                    print(f"      ⚠️ PaddleOCR returned [None]!")
+                else:
+                    logger.info(f"✅ PaddleOCR found {len(full_page_result[0])} raw lines")
+                    print(f"      ✅ PaddleOCR found {len(full_page_result[0])} raw lines")
 
                 if full_page_result and full_page_result[0]:
                     # Collect all text lines with their positions
@@ -968,8 +1110,12 @@ Output ONLY the JSON array, nothing else."""
                         points = line[0]
                         text   = clean_text(line[1][0].strip())  # Enforce Latin-only
                         conf   = line[1][1]
-
-                        if not text or conf < 0.30 or len(text) < 2:
+                        
+                        if not text:
+                            continue
+                            
+                        if conf < 0.25 or len(text) < 2:
+                            # logger.debug(f"Skipping noisy OCR line: '{text}' (conf={conf:.2f})")
                             continue
 
                         # Convert polygon to axis-aligned bbox
@@ -1001,7 +1147,7 @@ Output ONLY the JSON array, nothing else."""
                             raw_lines.append({
                                 "text": text,
                                 "bbox": [lx1, ly1, lx2, ly2],
-                                "confidence": round(conf, 2),
+                                "confidence": round(float(conf), 2),
                             })
 
                     # ── Merge adjacent text lines into paragraphs ──
@@ -1054,13 +1200,27 @@ Output ONLY the JSON array, nothing else."""
 
                             # Heading heuristic: short text + tall font OR all caps
                             is_heading = (
-                                (line_h > avg_line_height * 1.3 and text_len < 80)
+                                (line_h > avg_line_height * 1.3 and text_len < 100)
                                 or (m['text'].isupper() and text_len < 60)
-                                or (text_len < 50 and line_h > 30)
+                                or (text_len < 50 and line_h > 28)
                             )
+                            
+                            # List-item heuristic: starts with bullet, dash, or number/letter followed by dot/parenthesis
+                            is_list = False
+                            list_patterns = [
+                                r'^[\u2022\u00b7\u25cf\u25cb\u25a0\-]\s+', # Bullet/dash
+                                r'^\d+[\.\)]\s+',                         # 1. or 1)
+                                r'^[a-z][\.\)]\s+(?![a-z])',              # a. or a)
+                                r'^[ivx]+[\.\)]\s+(?![a-z])'              # i. or i)
+                            ]
+                            if not is_heading:
+                                for pattern in list_patterns:
+                                    if re.match(pattern, m['text'], re.IGNORECASE):
+                                        is_list = True
+                                        break
 
                             elements.append({
-                                "type": "heading" if is_heading else "paragraph",
+                                "type": "heading" if is_heading else ("list" if is_list else "paragraph"),
                                 "text": m['text'],
                                 "bbox": m['bbox'],
                                 "confidence": m['confidence'],
@@ -1073,17 +1233,29 @@ Output ONLY the JSON array, nothing else."""
                         )
 
             except Exception as e:
+                import traceback
                 logger.error(f"Full-page OCR failed: {e}")
+                logger.error(f"OCR traceback: {traceback.format_exc()}")
 
             # ── Auto-filter Headers and Footers ──
             # Ignore elements whose center is in the top 6% or bottom 6% of the image (typical header/footer zones)
+            # IMPORTANT: Use ocr_img height for filtering since bboxes are in ocr_img coordinates
+            ocr_h = ocr_img.shape[0]
             filtered_elements = []
-            header_margin = h * 0.06
-            footer_margin = h * 0.94
+            header_margin = ocr_h * 0.06
+            footer_margin = ocr_h * 0.94
+            pre_filter_count = len(elements)
             for e in elements:
                 y_center = (e['bbox'][1] + e['bbox'][3]) / 2
                 if header_margin < y_center < footer_margin:
                     filtered_elements.append(e)
+            
+            if pre_filter_count > 0 and len(filtered_elements) == 0:
+                logger.warning(f"⚠️ Header/footer filter removed ALL {pre_filter_count} elements! Using unfiltered.")
+                print(f"      ⚠️ Header/footer filter killed all {pre_filter_count} elements! Reverting.")
+                filtered_elements = elements  # Revert — don't lose everything
+            elif pre_filter_count > len(filtered_elements):
+                logger.info(f"Header/footer filter: {pre_filter_count} → {len(filtered_elements)} elements")
             
             elements = filtered_elements
 
@@ -1215,7 +1387,7 @@ Output ONLY the JSON array, nothing else."""
             "true", "1", "yes", "on"
         )
 
-        if not direct_translate and ai_enabled and elements:
+        if ai_enabled and elements:
             logger.info(f"🧠 Stage 3: AI chapter classification (text-only, lang={lang})...")
             classifications = self._classify_chapters_ai(elements, lang=lang)
 
@@ -1251,6 +1423,8 @@ Output ONLY the JSON array, nothing else."""
                 logger.info("ℹ️ AI classification disabled (AI_VISION_OCR_ENABLED=false)")
 
         # ── STAGE 4: Crop Visual Elements ─────────────────────────
+        print(f"      📦 Stage 4: {len(elements)} elements to process for crops")
+        logger.info(f"📦 Stage 4: Processing {len(elements)} elements for visual cropping")
         final_elements = []
         for idx, elem in enumerate(elements):
             crop_url = None
@@ -1260,8 +1434,8 @@ Output ONLY the JSON array, nothing else."""
                 x1, y1, x2, y2 = elem['bbox']
                 pad = 20
                 px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
-                px2, py2 = min(w, x2 + pad), min(h, y2 + pad)
-                crop_visual = original_img[py1:py2, px1:px2]
+                px2, py2 = min(ocr_img.shape[1], x2 + pad), min(ocr_img.shape[0], y2 + pad)
+                crop_visual = ocr_img[py1:py2, px1:px2]
 
                 if crop_visual.size > 0:
                     crop_fname = f"{filename_base}_crop_{elem['type']}_{idx}.png"
@@ -1286,8 +1460,16 @@ Output ONLY the JSON array, nothing else."""
             })
 
         logger.info(f"✅ Hybrid scan complete: {len(final_elements)} elements")
+        print(f"      📊 scan_document({os.path.basename(image_path)}): {len(final_elements)} elements found")
+        # ── Final Cleanup & Scaling ──
+        # Scale everything back to original_img coordinates before returning
+        if ocr_scale != 1.0:
+            for e in final_elements:
+                e['bbox'] = [int(v / ocr_scale) for v in e['bbox']]
+                
         return {
             "elements": final_elements,
+            "preview_url": f"http://127.0.0.1:8000/output/{preview_fname}",
             "clean_image_path": preview_path
         }
 

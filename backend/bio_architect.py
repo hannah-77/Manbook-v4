@@ -54,7 +54,7 @@ class BioArchitect:
 
     def __init__(self):
         self.base_path = _get_base_path()
-
+        self.letterhead_path = None
 
     def _resolve_crop_path(self, item):
         """
@@ -184,54 +184,9 @@ class BioArchitect:
     # ─────────────────────────────────────────────
     def _add_header_footer(self, doc, bab_label=""):
         """
-        Header: KOSONG (tidak ada teks)
-        Footer: letterhead.png full-width (gelombang biru + logo Elitech) + nomor halaman
+        Header and Footer dihilangkan sesuai permintaan user.
         """
-        section = doc.sections[0]
-
-        # ── HEADER: Kosongkan ──────────────────────────────────────
-        section.different_first_page_header_footer = True
-        header = section.header
-        header.is_linked_to_previous = False
-
-        if not header.paragraphs:
-            header.add_paragraph()
-        hp = header.paragraphs[0]
-        hp.clear()
-        # Header dibiarkan kosong sesuai permintaan user
-
-        # ── FOOTER ──────────────────────────────────────────
-        footer = section.footer
-        footer.is_linked_to_previous = False
-
-        if not footer.paragraphs:
-            footer.add_paragraph()
-        fp = footer.paragraphs[0]
-        fp.clear()
-        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp.paragraph_format.space_before = Pt(0)
-        fp.paragraph_format.space_after = Pt(0)
-
-        # Tambahkan nomor halaman di atas letterhead
-        run_pg = fp.add_run()
-        run_pg.font.name  = 'Arial'
-        run_pg.font.size  = Pt(9)
-        run_pg.font.color.rgb = self.COLOR_PRIMARY
-        run_pg.font.bold  = True
-
-        fldChar1 = OxmlElement('w:fldChar')
-        fldChar1.set(qn('w:fldCharType'), 'begin')
-        instrText = OxmlElement('w:instrText')
-        instrText.text = ' PAGE '
-        fldChar2 = OxmlElement('w:fldChar')
-        fldChar2.set(qn('w:fldCharType'), 'end')
-        run_pg._r.extend([fldChar1, instrText, fldChar2])
-
-        # Standard text footer
-        run_co = fp.add_run("\n© Elitech Technovision")
-        run_co.font.name  = 'Arial'
-        run_co.font.size  = Pt(8)
-        run_co.font.color.rgb = self.COLOR_GRAY
+        pass
 
     # ─────────────────────────────────────────────
     # Cover Page
@@ -300,14 +255,6 @@ class BioArchitect:
         rbm.font.bold  = True
         rbm.font.color.rgb = self.COLOR_BLACK
 
-        # No letterhead branding on cover
-        p_co = doc.add_paragraph()
-        p_co.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run_co = p_co.add_run("© Elitech Technovision")
-        run_co.font.name  = 'Arial'
-        run_co.font.size  = Pt(10)
-        run_co.font.color.rgb = self.COLOR_GRAY
-        
         doc.add_page_break()
 
     # ─────────────────────────────────────────────
@@ -501,6 +448,8 @@ class BioArchitect:
 
         # Collect candidate headings (non-generic) from BAB 1
         heading_candidates = []
+        legal_keywords = {'fcc', 'safety', 'notifikasi', 'warning', 'peringatan', 'keamanan', 'legal', 'ketentuan', 'pemberitahuan'}
+        
         for idx, item in enumerate(classified_data):
             if item.get('chapter_id') not in cover_chapters:
                 continue
@@ -508,18 +457,18 @@ class BioArchitect:
             text = item.get('normalized', '').strip()
             text_lower = text.lower() if text else ''
 
-            # Pertimbangkan heading, title, DAN paragraph pendek sebagai kandidat nama produk
-            if item_type in ('title', 'heading') or (item_type == 'paragraph' and len(text) < 50):
+            # Product Name MUST be a heading or title
+            if item_type in ('title', 'heading'):
                 # Mark generic cover titles for exclusion
                 if text_lower in generic_titles or text_lower in cover_only_titles:
                     cover_item_indices.add(idx)
                     continue
                 
-                # Skip known brand names
-                if 'elitech' in text_lower or 'technovision' in text_lower or text_lower.startswith('pt.'):
+                # Skip known brand names or legal text
+                if 'elitech' in text_lower or 'technovision' in text_lower or text_lower.startswith('pt.') or any(k in text_lower for k in legal_keywords):
                     continue
                     
-                if text and len(text) > 2:
+                if text and 3 < len(text) < 60:
                     heading_candidates.append((idx, text))
                     cover_item_indices.add(idx)
 
@@ -533,29 +482,30 @@ class BioArchitect:
                 product_name_idx, product_name = heading_candidates[0]
 
         # Description = next text element AFTER product name in document order
-        # (short description like "Pengukur Panjang Badan Bayi dan Pengukur Tinggi Badan Dewasa")
-        if product_name_idx >= 0:
+        # (Must be SHORT - max 15 words)
+        if not custom_product_desc and product_name_idx >= 0:
             for idx, item in enumerate(classified_data):
                 if idx <= product_name_idx:
                     continue
                 if item.get('chapter_id') not in cover_chapters:
                     continue
                 item_type = item.get('type', '')
-                if item_type not in ('title', 'heading', 'paragraph'):
-                    continue
                 text = item.get('normalized', '').strip()
-                text_lower = text.lower() if text else ''
+                if not text: continue
+                text_lower = text.lower()
                 
-                # Skip known brand names
-                if 'elitech' in text_lower or 'technovision' in text_lower or text_lower.startswith('pt.'):
-                    continue
-                    
-                if text and len(text) > 3 and text_lower not in generic_titles and text_lower not in cover_only_titles:
-                    product_desc = text
-                    cover_item_indices.add(idx)
-                    break
+                # Strict filtering for description:
+                # 1. Must be short (max 15 words)
+                # 2. No legal keywords
+                # 3. Not a generic title
+                words = text.split()
+                if 2 < len(words) <= 15 and not any(k in text_lower for k in legal_keywords):
+                    if text_lower not in generic_titles and text_lower not in cover_only_titles:
+                        product_desc = text
+                        cover_item_indices.add(idx)
+                        break
 
-        # Apply custom overrides if user has edited them
+        # Apply custom overrides
         if custom_product_name:
             product_name = custom_product_name
         if custom_product_desc:
@@ -606,12 +556,6 @@ class BioArchitect:
                 content_type = item['type']
                 text         = item['normalized']
 
-                # ── Tabel dari DOCX tidak punya crop gambar, formatnya berwujud Markdown (Teks) ──
-                # Jika dia 'table' tapi murni teks Markdown tanpa gambar crop (atau pakai fake PIL crop), alihkan ke pemroses teks
-                resolved_crop = self._resolve_crop_path(item)
-                if content_type == 'table' and (not resolved_crop or '_preview_only' in resolved_crop):
-                    content_type = 'paragraph'
-
                 if content_type in ('title', 'heading'):
                     # Tentukan level heading berdasarkan teks atau level tersimpan
                     stored_lvl = item.get('heading_level', 0)
@@ -623,13 +567,11 @@ class BioArchitect:
                 elif content_type in ('figure', 'table'):
                     # ── Resolve crop image path with multiple fallback strategies ──
                     crop_local_val = self._resolve_crop_path(item)
-                    logger.info(f"🖼️ {content_type}: crop_local={crop_local_val!r}, exists={os.path.exists(crop_local_val) if crop_local_val else 'N/A'}")
+                    
                     if crop_local_val and os.path.exists(crop_local_val):
                         # Check if the crop file is large enough to be an actual image
-                        # Very small files (<5KB) are likely just cropped caption text
                         crop_file_size = os.path.getsize(crop_local_val)
-                        logger.info(f"   📏 crop size: {crop_file_size} bytes")
-                        if crop_file_size < 5000:  # Less than 5KB
+                        if crop_file_size < 5000:
                             # Too small — probably just caption text, render as paragraph
                             if text and text not in ("[TABLE DATA DETECTED]", "[FIGURE]", "[TABLE]"):
                                 p = doc.add_paragraph(text)
@@ -649,26 +591,11 @@ class BioArchitect:
                             cell_para = cell.paragraphs[0]
                             cell_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                             cell_para.paragraph_format.first_line_indent = Pt(0)
-                            # FIX: remove exact line spacing that clips the image
                             cell_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
                             cell_para.paragraph_format.space_before = Pt(0)
                             cell_para.paragraph_format.space_after = Pt(0)
                             run_img = cell_para.add_run()
-                            
-                            # Cek lebar/resolusi untuk insert
-                            try:
-                                from PIL import Image
-                                with Image.open(crop_local_val) as img_temp:
-                                    w, h = img_temp.size
-                                # Jika gambar terlalu kecil, gunakan fallback
-                                if w < 50 and h < 50:
-                                    doc.add_paragraph(f"[ Gambar terlalu kecil ]")
-                                    continue
-                            except Exception:
-                                pass
-
                             run_img.add_picture(crop_local_val, width=Inches(4.5))
-                            logger.info(f"   ✅ Picture added successfully: {os.path.basename(crop_local_val)}")
                         except Exception as e:
                             logger.error(f"Error adding picture: {e}")
                             doc.add_paragraph(f"[ Gagal load gambar: {e} ]")
@@ -684,16 +611,42 @@ class BioArchitect:
                             cap.runs[0].font.color.rgb = self.COLOR_GRAY
 
                         doc.add_paragraph()   # spasi setelah gambar
-
+                    
+                    # ── Fallback: Render as Word Table if data exists but image crop failed ──
+                    elif content_type == 'table' and item.get('table_data'):
+                        table_data = item['table_data']
+                        num_rows = len(table_data)
+                        num_cols = max(len(row) for row in table_data) if table_data else 0
+                        
+                        if num_rows > 0 and num_cols > 0:
+                            logger.info(f"   📊 Rendering Word table from table_data ({num_rows}x{num_cols})")
+                            tbl = doc.add_table(rows=num_rows, cols=num_cols)
+                            tbl.style = 'Table Grid'
+                            for r_idx, row in enumerate(table_data):
+                                for c_idx, val in enumerate(row):
+                                    if c_idx < num_cols:
+                                        c = tbl.cell(r_idx, c_idx)
+                                        c.text = str(val)
+                                        # Bold header row
+                                        if r_idx == 0:
+                                            for para in c.paragraphs:
+                                                for run in para.runs:
+                                                    run.font.bold = True
+                            doc.add_paragraph() # Spacer after table
+                    
                     else:
                         logger.warning(f"   ❌ Could not resolve any crop path for {content_type}")
-                        logger.warning(f"      item keys: {list(item.keys())}")
-                        logger.warning(f"      crop_local: {item.get('crop_local')!r}")
-                        logger.warning(f"      crop_url: {item.get('crop_url')!r}")
                         p = doc.add_paragraph(f"[ {content_type} — gambar tidak tersedia ]")
                         p.paragraph_format.first_line_indent = Pt(0)
                         p.runs[0].font.color.rgb = self.COLOR_GRAY
 
+                elif content_type == 'list':
+                    # Rendering list items using 'List Bullet' style
+                    p = doc.add_paragraph(text, style='List Bullet')
+                    p.paragraph_format.space_before = Pt(0)
+                    p.paragraph_format.space_after = Pt(4)
+                    p.paragraph_format.first_line_indent = Pt(0)
+                    
                 else:  # Body text
                     lines = text.strip().split('\n')
                     is_md_table = False
@@ -770,12 +723,28 @@ class BioArchitect:
         doc.save(word_path)
         logger.info(f"✓ Word file saved: {word_filename}")
 
-        # ── Konversi ke PDF ──────────────────────────────────────
+        # ── Konversi ke PDF (SILENT — tidak membuka Word secara visible) ──
         pdf_filename = f"{safe_name}.pdf"
         pdf_path = os.path.join(self.base_path, pdf_filename)
         try:
-            from docx2pdf import convert
-            convert(word_path, pdf_path)
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            
+            abs_word_path = os.path.abspath(word_path)
+            abs_pdf_path = os.path.abspath(pdf_path)
+            
+            word_app = win32com.client.DispatchEx("Word.Application")
+            word_app.Visible = False
+            word_app.DisplayAlerts = False
+            try:
+                doc_com = word_app.Documents.Open(abs_word_path, ReadOnly=True)
+                doc_com.SaveAs2(abs_pdf_path, FileFormat=17)  # 17 = wdFormatPDF
+                doc_com.Close(SaveChanges=False)
+            finally:
+                word_app.Quit()
+                del word_app
+            
             logger.info(f"✓ PDF file saved: {pdf_filename}")
         except Exception as e:
             logger.warning(f"⚠️ PDF conversion failed: {e}")

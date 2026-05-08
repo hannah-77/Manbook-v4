@@ -16,9 +16,30 @@ import re
 import cv2
 import logging
 import numpy as np
+import json
+import base64
 from pathlib import Path
+import pdfplumber
+import PyPDF2
+from docx import Document
 
 logger = logging.getLogger("BioManual.DirectReader")
+
+_WATERMARK_PATTERNS = [
+    r'(?i)draft', r'(?i)confidential', r'(?i)strictly confidential',
+    r'(?i)internal use', r'(?i)preview', r'(?i)watermark', 
+    r'(?i)sample', r'(?i)copy', r'(?i)not for distribution'
+]
+
+def _is_watermark(text: str) -> bool:
+    """Check if the text matches common watermark patterns."""
+    if not text: return False
+    clean = text.strip()
+    if len(clean) < 3 or len(clean) > 30: return False
+    for p in _WATERMARK_PATTERNS:
+        if re.search(p, clean):
+            return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -102,20 +123,13 @@ def is_text_pdf(pdf_path: str, sample_pages: int = 5) -> dict:
 def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
     """
     Extract content directly from DOCX using python-docx.
-    
-    Returns list of elements in the same format as vision_engine.scan_document():
-    [
-        {"type": "heading", "text": "...", "confidence": 1.0, "bbox": [...], ...},
-        {"type": "paragraph", "text": "...", "confidence": 1.0, "bbox": [...], ...},
-        {"type": "table", "text": "[TABLE]", "confidence": 1.0, "bbox": [...], 
-         "table_data": [[...], ...], ...},
-        {"type": "figure", "text": "[FIGURE]", "confidence": 1.0, "bbox": [...], ...},
-    ]
     """
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    
-    doc = Document(docx_path)
+    try:
+        with open(docx_path, 'rb') as f:
+            doc = Document(f)
+    except Exception as e:
+        logger.error(f"Failed to open DOCX: {e}")
+        return []
     elements = []
     y_position = 0  # Simulated vertical position for ordering
     LINE_HEIGHT = 30  # Simulated line height in pixels
@@ -148,18 +162,25 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                 continue
             
             text = para.text.strip()
-            import re
             
-            # Find inline shapes and extract their embedded relationship ID (rId)
-            # This completely ignores <wp:anchor> which are floating decorations like header waves
-            xml_str = para._element.xml
-            inline_xmls = re.findall(r'<wp:inline.*?</wp:inline>', xml_str, re.DOTALL)
-            
-            rIds = []
-            for ix in inline_xmls:
-                match = re.search(r'r:embed="([^"]+)"', ix)
-                if match:
-                    rIds.append(match.group(1))
+            # Filter out watermarks
+            if _is_watermark(text):
+                continue
+                
+            if not text:
+                # Check for images in inline shapes
+                inline_shapes = para._element.findall(
+                    './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
+                )
+                if inline_shapes:
+                    elements.append({
+                        "type": "figure",
+                        "text": "[FIGURE]",
+                        "confidence": 1.0,
+                        "bbox": [0, y_position, 800, y_position + 200],
+                    })
+                    y_position += 200
+                continue
             
             # Determine type: heading vs paragraph
             style_name = (para.style.name or "").lower()
@@ -188,29 +209,30 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
                         if max_size and max_size >= 177800:
                             elem_type = "heading"
             
-            # Prior to recording text, record any leading figures (optional: order isn't perfect, but appending them is fine)
+            # Check if paragraph contains inline images/drawings along with text
+            inline_shapes = para._element.findall(
+                './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
+            )
             
             # Estimate bbox based on text length
             text_height = max(LINE_HEIGHT, (len(text) // 80 + 1) * LINE_HEIGHT)
             bbox = [50, y_position, 750, y_position + text_height]
             
-            if text:
-                elements.append({
-                    "type": elem_type,
-                    "text": text,
-                    "confidence": 1.0,
-                    "bbox": bbox,
-                })
-                y_position += text_height + 5
+            elements.append({
+                "type": elem_type,
+                "text": text,
+                "confidence": 1.0,
+                "bbox": bbox,
+            })
+            y_position += text_height + 5
             
-            # Add the mapped inline image elements found in this paragraph
-            for rId in rIds:
+            # If there were also images in this paragraph, add them
+            if inline_shapes:
                 elements.append({
                     "type": "figure",
                     "text": "[FIGURE]",
                     "confidence": 1.0,
                     "bbox": [50, y_position, 750, y_position + 200],
-                    "rId": rId  # Explicit mapping for exact image extraction
                 })
                 y_position += 200
         
@@ -243,56 +265,16 @@ def extract_docx_direct(docx_path: str, lang: str = 'id') -> list[dict]:
             # Create markdown representation of table
             table_md = _table_to_markdown(table_data)
             
-            # Generate fake crop image for the UI preview
-            crop_fname = f"{base_name}_table_{len(elements)}_preview_only.png"
-            crop_path = os.path.join(output_dir, crop_fname)
-            
-            try:
-                from PIL import Image, ImageDraw, ImageFont
-                col_widths = []
-                for c in range(len(table_data[0])):
-                    max_w = max([len(str(row[c])) for row in table_data if c < len(row)] + [5])
-                    col_widths.append(min(max_w * 7 + 20, 300))  # cap column width
-                    
-                row_height = 25
-                img_w = min(sum(col_widths) + 20, 1500)
-                img_h = min(len(table_data) * row_height + 20, 2000)
-                
-                img = Image.new('RGB', (img_w, img_h), color=(250, 250, 250))
-                d = ImageDraw.Draw(img)
-                y_c = 10
-                for r_idx, row in enumerate(table_data):
-                    x_c = 10
-                    for c_idx, cell in enumerate(row):
-                        if c_idx >= len(col_widths): break
-                        w = col_widths[c_idx]
-                        d.rectangle([x_c, y_c, x_c+w, y_c+row_height], outline=(200, 200, 200))
-                        txt = str(cell).replace('\n', ' ')
-                        max_chars = (w - 10) // 6
-                        if len(txt) > max_chars: txt = txt[:max_chars-3] + "..."
-                        color = (50,50,50) if r_idx > 0 else (0,0,120)
-                        d.text((x_c+5, y_c+5), txt, fill=color)
-                        x_c += w
-                    y_c += row_height
-                    if y_c > img_h - row_height: break
-                    
-                img.save(crop_path)
-                from urllib.parse import quote
-                crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
-            except Exception as e:
-                logger.warning(f"PIL table generation failed: {e}")
-                crop_path = None
-                crop_url = None
-            
+            # Change: User wants tables to be "cut" (cropped) not turned into text.
+            # For Word, we can't easily crop yet, but we'll stop showing the text.
             table_height = max(100, len(table_data) * LINE_HEIGHT)
             elements.append({
                 "type": "table",
-                "text": table_md if table_md else "[TABLE]",
+                "text": "[TABLE]",
                 "confidence": 1.0,
                 "bbox": [50, y_position, 750, y_position + table_height],
                 "table_data": table_data,
-                "crop_local": crop_path,
-                "crop_url": crop_url
+                "markdown_text": table_md  # Keep as metadata
             })
             y_position += table_height + 10
     
@@ -361,13 +343,11 @@ def _table_to_markdown(table_data: list[list[str]]) -> str:
 def _extract_docx_images(doc, docx_path: str, elements: list):
     """
     Extract embedded images from DOCX and save them to output_results/.
-    Only extracts images related to the main document body (`document.xml`),
-    automatically filtering out headers, footers, and page backgrounds.
     Updates figure elements with crop_url and crop_local paths.
     """
     try:
+        import zipfile
         from PIL import Image
-        import io
         
         backend_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(backend_dir, "output_results")
@@ -375,26 +355,32 @@ def _extract_docx_images(doc, docx_path: str, elements: list):
         
         base_name = os.path.splitext(os.path.basename(docx_path))[0]
         
-        img_idx = 0
-        figure_elements = [e for e in elements if e['type'] == 'figure']
-        
-        # Iterate over only elements related to the main document body!
-        # This completely skips header1.xml, footer1.xml and background images
-        for rel in doc.part.rels.values():
-            if "image" in rel.reltype:
-                image_part = rel.target_part
-                ext = image_part.content_type.split('/')[-1].lower()
-                
-                # Skip invalid extensions
-                if ext not in ('png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff'):
+        # DOCX is a ZIP file — extract images from word/media/
+        with zipfile.ZipFile(docx_path, 'r') as z:
+            media_files = [f for f in z.namelist() if f.startswith('word/media/')]
+            
+            if not media_files:
+                return
+            
+            img_idx = 0
+            figure_elements = [e for e in elements if e['type'] == 'figure']
+            
+            for media_path in sorted(media_files):
+                ext = os.path.splitext(media_path)[1].lower()
+                if ext not in ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.emf', '.wmf'):
                     continue
                 
                 try:
-                    img_data = image_part.blob
+                    img_data = z.read(media_path)
                     
                     # Save to output_results
-                    crop_fname = f"{base_name}_direct_img_{img_idx}.{ext}"
+                    crop_fname = f"{base_name}_direct_img_{img_idx}.png"
                     crop_path = os.path.join(output_dir, crop_fname)
+                    
+                    # Convert to PNG if needed
+                    if ext in ('.emf', '.wmf'):
+                        # Skip vector formats — can't easily convert
+                        continue
                     
                     with open(crop_path, 'wb') as f:
                         f.write(img_data)
@@ -408,10 +394,11 @@ def _extract_docx_images(doc, docx_path: str, elements: list):
                         figure_elements[img_idx]['crop_local'] = crop_path
                     
                     img_idx += 1
+                
                 except Exception as e:
-                    logger.warning(f"Failed to extract body image {image_part.partname}: {e}")
-                    
-        logger.info(f"📸 Extracted {img_idx} body images from DOCX (Headers/Footers skipped)")
+                    logger.warning(f"Failed to extract image {media_path}: {e}")
+        
+        logger.info(f"📸 Extracted {img_idx} images from DOCX")
     
     except Exception as e:
         logger.warning(f"DOCX image extraction error: {e}")
@@ -436,7 +423,8 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
         ]
     }
     """
-    import pdfplumber
+    import cv2
+    import numpy as np
     
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(backend_dir, "output_results")
@@ -451,9 +439,8 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
         logger.info(f"📄 PDF Direct Reader: {total_pages} pages")
         
         for page_idx, page in enumerate(pdf.pages):
-            # ── Column Detection (Visual) ──
-            # Render page to detect gaps visually (more reliable for manuals)
-            # This allows us to handle 2, 3, or even 4 column layouts without interleaving text.
+            # ── Visual Column Detection (Render + CV) ──
+            # This allows us to handle 2, 3, or 4 column layouts without interleaving text.
             col_boundaries = [0, page.width]
             try:
                 # Render low-res for speed
@@ -466,19 +453,18 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                 _, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
                 
                 # Vertical projection (percentage of white pixels)
-                margin_y = int(h_cv * 0.1) # Ignore header/footer for column detection
-                roi = binary[margin_y:h_cv-margin_y, :]
+                roi = binary[int(h_cv*0.1):int(h_cv*0.9), :] # Ignore headers/footers
                 white_ratio = np.mean(roi == 255, axis=0) # shape (w_cv,)
                 
                 # Smooth
-                kernel = np.ones(max(3, w_cv // 80)) / max(3, w_cv // 80)
+                kernel = np.ones(max(3, w_cv // 60)) / max(3, w_cv // 60)
                 white_smooth = np.convolve(white_ratio, kernel, mode='same')
                 
-                # Identify gaps (> 95% white)
-                is_gap = white_smooth > 0.95
+                # Identify gaps (> 85% white is safer for icons)
+                is_gap = white_smooth > 0.85
                 min_gap_w = max(5, int(w_cv * 0.012))
                 
-                gaps = []
+                detected_gaps = []
                 in_gap = False
                 gs = 0
                 for x in range(w_cv):
@@ -489,33 +475,51 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                         gw = x - gs
                         if gw >= min_gap_w:
                             gc = gs + gw // 2
-                            # Ignore edges (10% margin)
-                            if w_cv * 0.1 < gc < w_cv * 0.9:
-                                gaps.append(gc * (page.width / w_cv))
+                            # Ignore edges (15% margin)
+                            if w_cv * 0.15 < gc < w_cv * 0.85:
+                                detected_gaps.append({'center': gc * (page.width / w_cv)})
                         in_gap = False
                 
-                if gaps:
-                    col_boundaries = sorted([0] + gaps + [page.width])
+                # AI FALLBACK: If heuristic fails but page is wide, ask AI
+                # This handles complex 3-column layouts with icons in gutters
+                if len(detected_gaps) == 0 and page.width > 500:
+                    try:
+                        from openrouter_client import get_openrouter_client
+                        client = get_openrouter_client()
+                        if client and client.is_available:
+                            img_ai = cv2.resize(img_cv, (1000, 1000)) if w_cv > 1000 else img_cv
+                            _, buffer = cv2.imencode('.jpg', img_ai, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            img_b64 = base64.b64encode(buffer).decode('utf-8')
+                            vision_model = os.getenv("AI_VISION_MODEL", "google/gemini-2.0-flash-001")
+                            prompt = "Analyze the vertical column layout. Ignore icons in gutters. How many columns? Return JSON: {\"columns\": 2, \"gap_centers\": [50.5]}"
+                            response = client.call(prompt, image_base64=img_b64, timeout=12)
+                            if response:
+                                jm = re.search(r'\{.*\}', response, re.DOTALL)
+                                if jm:
+                                    ai_res = json.loads(jm.group())
+                                    if ai_res.get("columns", 1) >= 2 and ai_res.get("gap_centers"):
+                                        detected_gaps = [{'center': page.width * (gc/100.0)} for gc in ai_res["gap_centers"]]
+                    except: pass
+
+                if detected_gaps:
+                    centers = sorted([g['center'] for g in detected_gaps])
+                    col_boundaries = [0] + centers + [page.width]
                     logger.info(f"📊 Page {page_idx+1}: detected {len(col_boundaries)-1} columns")
             except Exception as e:
-                logger.warning(f"Visual column detection failed for page {page_idx+1}: {e}")
+                logger.warning(f"Column detection failed for page {page_idx+1}: {e}")
 
-            # ── Extract text & elements for EACH column ────────────
+            # ── Extract elements for EACH column ────────────
+            page_elements = []
             for col_idx in range(len(col_boundaries) - 1):
                 cx1, cx2 = col_boundaries[col_idx], col_boundaries[col_idx+1]
                 
-                # Buffer for overlap
-                pad = 2
+                # Overlap pad (15px) to prevent truncation of edge characters
+                pad = 15
                 crop_bbox = (max(0, cx1 - pad), 0, min(page.width, cx2 + pad), page.height)
                 col_page = page.crop(crop_bbox)
                 
-                col_elements = []
-                
-                # 1. Extract words in THIS column
-                raw_words = col_page.extract_words(
-                    x_tolerance=3, y_tolerance=3, keep_blank_chars=False,
-                    extra_attrs=['fontname', 'size']
-                )
+                # 1. Words
+                raw_words = col_page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False, extra_attrs=['fontname', 'size'])
                 
                 # Filter margins
                 header_margin = min(60, page.height * 0.08)
@@ -523,140 +527,55 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                 words = [w for w in raw_words if header_margin < ((w['top']+w['bottom'])/2) < footer_margin]
                 
                 if words:
-                    # Group words into lines (per column)
                     lines = _group_words_into_lines(words, page.height)
-                    
-                    # Merge lines into paragraphs
                     paragraphs = _merge_lines_into_paragraphs(lines, page.width, page.height)
-                    
-                    # Detect headings
                     avg_fs = np.mean([p['avg_size'] for p in paragraphs if p.get('avg_size')]) if paragraphs else 11
                     for para in paragraphs:
-                        text = para['text'].strip()
-                        if not text: continue
-                        
                         etype = "paragraph"
                         fs = para.get('avg_size', avg_fs)
+                        text = para['text'].strip()
+                        if not text: continue
                         if fs > avg_fs * 1.2 and len(text) < 100: etype = "heading"
                         elif text.isupper() and len(text) < 80: etype = "heading"
                         elif para.get('is_bold') and len(text) < 80: etype = "heading"
                         
-                        col_elements.append({
-                            "type": etype,
-                            "text": text,
-                            "confidence": 1.0,
-                            "bbox": para['bbox'], # Relative to page
+                        # Ignore watermarks
+                        if _is_watermark(text):
+                            continue
+                            
+                        page_elements.append({
+                            "type": etype, "text": text, "confidence": 1.0, "bbox": para['bbox']
                         })
 
-                # 2. Extract tables in THIS column
-                # Use a tighter strategy to avoid capturing partial tables from other columns
-                tables = col_page.extract_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                })
-                table_finder = col_page.find_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                })
-                
+                # 2. Tables
+                tables = col_page.extract_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"})
+                table_finder = col_page.find_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"})
                 if tables:
                     for t_idx, table_data in enumerate(tables):
                         if not table_data or not any(any(c for c in r if c) for r in table_data): continue
-                        
                         clean_table = [[(c or "").strip() for c in r] for r in table_data]
                         table_md = _table_to_markdown(clean_table)
+                        tb = table_finder[t_idx].bbox if t_idx < len(table_finder) else [cx1, 0, cx2, 100]
+                        bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
+                        # Remove overlapping paragraphs
+                        page_elements = [e for e in page_elements if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)]
                         
-                        if t_idx < len(table_finder):
-                            tb = table_finder[t_idx].bbox
-                            # Important: convert back to full-page coordinates
-                            # col_page is already cropped, so x-coords are local.
-                            # But pdfplumber crop() maintains coordinates relative to original page usually, 
-                            # however let's be safe.
-                            bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
-                        else:
-                            bbox = [int(cx1), 0, int(cx2), 100]
-                        
-                        # Filter overlap
-                        col_elements = [e for e in col_elements if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)]
-                        col_elements.append({
-                            "type": "table",
-                            "text": table_md or "[TABLE]",
-                            "confidence": 1.0,
-                            "bbox": bbox,
-                            "table_data": clean_table,
+                        # Change: [TABLE] placeholder, actual crop handled below
+                        page_elements.append({
+                            "type": "table", "text": "[TABLE]", "confidence": 1.0, "bbox": bbox, 
+                            "table_data": clean_table, "markdown_text": table_md
                         })
 
-                # 3. Extract images in THIS column
-                if hasattr(page, 'images') and page.images:
-                    for img in page.images:
-                        # Only check x center
-                        ix0, ix1 = img.get('x0', 0), img.get('x1', 0)
-                        ic = (ix0 + ix1) / 2
-                        if cx1 < ic < cx2:
-                            iw, ih = ix1 - ix0, img.get('bottom', 0) - img.get('top', 0)
-                            if iw > 50 and ih > 50:
-                                col_elements.append({
-                                    "type": "figure", "text": "[FIGURE]",
-                                    "confidence": 1.0,
-                                    "bbox": [int(ix0), int(img.get('top',0)), int(ix1), int(img.get('bottom',0))]
-                                })
-
-                if col_elements:
-                    col_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
-                    # Add to results as a separate "page" if multi-column
-                    pages_result.append({
-                        "page_num": page_idx,
-                        "column_num": col_idx + 1,
-                        "total_columns": len(col_boundaries) - 1,
-                        "elements": col_elements,
-                        "column_bbox": [int(cx1), 0, int(cx2), int(page.height)]
-                    })
-            
-            # ── Extract tables ──
-            tables = page.extract_tables({
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-            })
-            
-            if tables:
-                # Also get table bounding boxes
-                table_finder = page.find_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
+            if not page_elements:
+                pages_result.append({"page_num": page_idx, "elements": [], "is_empty": True})
+            else:
+                # Sort elements top-to-bottom
+                page_elements.sort(key=lambda x: (x['bbox'][1], x['bbox'][0]))
+                pages_result.append({
+                    "page_num": page_idx,
+                    "elements": page_elements,
+                    "is_empty": False
                 })
-                
-                for t_idx, table_data in enumerate(tables):
-                    if not table_data or not any(any(cell for cell in row if cell) for row in table_data):
-                        continue
-                    
-                    # Clean table data
-                    clean_table = []
-                    for row in table_data:
-                        clean_row = [(cell or "").strip() for cell in row]
-                        clean_table.append(clean_row)
-                    
-                    table_md = _table_to_markdown(clean_table)
-                    
-                    # Get table bbox
-                    if t_idx < len(table_finder):
-                        tb = table_finder[t_idx].bbox
-                        bbox = [int(tb[0]), int(tb[1]), int(tb[2]), int(tb[3])]
-                    else:
-                        bbox = [0, 0, int(page.width), 100]
-                    
-                    # Remove paragraph elements that overlap with this table
-                    elements = [
-                        e for e in elements
-                        if not _bbox_overlap(e['bbox'], bbox, threshold=0.5)
-                    ]
-                    
-                    elements.append({
-                        "type": "table",
-                        "text": table_md if table_md else "[TABLE]",
-                        "confidence": 1.0,
-                        "bbox": bbox,
-                        "table_data": clean_table,
-                    })
             
             # ── Extract images ──
             if hasattr(page, 'images') and page.images:
@@ -671,20 +590,62 @@ def extract_pdf_direct(pdf_path: str, lang: str = 'id') -> dict:
                     img_w = img_bbox[2] - img_bbox[0]
                     img_h = img_bbox[3] - img_bbox[1]
                     if img_w > 50 and img_h > 50:
-                        elements.append({
+                        page_elements.append({
                             "type": "figure",
                             "text": "[FIGURE]",
                             "confidence": 1.0,
                             "bbox": img_bbox,
                         })
             
+            # ── 3. Generate Crops for Visual Elements (Requirement: "dipotong") ──
+            if any(e['type'] in ('table', 'figure') for e in page_elements):
+                try:
+                    # Render high-res for cropping
+                    crop_render = page.to_image(resolution=200)
+                    crop_img_cv = cv2.cvtColor(np.array(crop_render.original), cv2.COLOR_RGB2BGR)
+                    ch, cw = crop_img_cv.shape[:2]
+                    
+                    # Scale factor between PDF units and pixel units
+                    scale_x = cw / page.width
+                    scale_y = ch / page.height
+                    
+                    for idx, e in enumerate(page_elements):
+                        if e['type'] in ('table', 'figure'):
+                            ex1, ey1, ex2, ey2 = e['bbox']
+                            
+                            # Pad slightly
+                            pad = 10
+                            px1, py1 = max(0, int((ex1 - pad) * scale_x)), max(0, int((ey1 - pad) * scale_y))
+                            px2, py2 = min(cw, int((ex2 + pad) * scale_x)), min(ch, int((ey2 + pad) * scale_y))
+                            
+                            crop_visual = crop_img_cv[py1:py2, px1:px2]
+                            if crop_visual.size > 0:
+                                crop_fname = f"{base_name}_p{page_idx}_{e['type']}_{idx}.png"
+                                crop_path = os.path.join(output_dir, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+                                
+                                from urllib.parse import quote
+                                e['crop_url'] = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                                e['crop_local'] = crop_path
+                                logger.info(f"📸 PDF Direct Crop: {crop_fname}")
+                except Exception as ex:
+                    logger.warning(f"Failed to generate crops for page {page_idx+1}: {ex}")
+
             # Sort elements by vertical position (reading order)
-            elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
+            page_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
             
+            # Save a page preview too
+            preview_fname = f"PREVIEW_{base_name}_p{page_idx}.jpg"
+            preview_path = os.path.join(output_dir, preview_fname)
+            try:
+                page.to_image(resolution=100).save(preview_path)
+            except: pass
+
             pages_result.append({
                 "page_num": page_idx,
-                "elements": elements,
-                "is_empty": len(elements) == 0,
+                "elements": page_elements,
+                "is_empty": len(page_elements) == 0,
+                "page_image_local": preview_path
             })
     
     logger.info(
@@ -828,3 +789,144 @@ def _bbox_overlap(bbox1, bbox2, threshold=0.5) -> bool:
     area1 = max((bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1]), 1)
     
     return overlap_area / area1 > threshold
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. DOCX VISUAL CROP — Crop tables/figures from rendered PDF
+# ═══════════════════════════════════════════════════════════════
+
+def crop_visual_elements_from_pdf(pdf_path: str, structured_data: list, session_id: str) -> int:
+    """
+    After DOCX → PDF conversion, crop table and figure regions from rendered pages.
+    Updates structured_data items IN-PLACE with crop_url and crop_local paths.
+
+    This operates at the ELEMENT level (individual tables/figures) and does NOT
+    affect page-level column splitting or preview generation in any way.
+
+    Returns the number of elements that received a visual crop.
+    """
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(backend_dir, "output_results")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Find elements that need visual crops (no crop_local yet)
+    uncropped_tables = [(i, item) for i, item in enumerate(structured_data)
+                        if item.get('type') == 'table' and not item.get('crop_local')]
+    uncropped_figures = [(i, item) for i, item in enumerate(structured_data)
+                         if item.get('type') == 'figure' and not item.get('crop_local')]
+
+    if not uncropped_tables and not uncropped_figures:
+        logger.info("✓ All visual elements already have crops — skipping DOCX crop")
+        return 0
+
+    logger.info(
+        f"📸 DOCX Visual Crop: {len(uncropped_tables)} tables + "
+        f"{len(uncropped_figures)} figures need crops..."
+    )
+
+    crop_count = 0
+    table_crops = []
+    figure_crops = []
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_idx, page in enumerate(pdf.pages):
+                # Render at high resolution for clean visual crops
+                render = page.to_image(resolution=200)
+                img_cv = cv2.cvtColor(np.array(render.original), cv2.COLOR_RGB2BGR)
+                ch, cw = img_cv.shape[:2]
+
+                scale_x = cw / page.width
+                scale_y = ch / page.height
+
+                # ── Detect and crop TABLES ──
+                try:
+                    found_tables = page.find_tables({
+                        "vertical_strategy": "lines",
+                        "horizontal_strategy": "lines"
+                    })
+                    # Fallback: text-aligned tables (no visible borders)
+                    if not found_tables:
+                        found_tables = page.find_tables({
+                            "vertical_strategy": "text",
+                            "horizontal_strategy": "text"
+                        })
+
+                    for t_idx, table_obj in enumerate(found_tables):
+                        bbox = table_obj.bbox  # (x0, top, x1, bottom) PDF units
+                        pad = 10
+                        px1 = max(0, int(bbox[0] * scale_x) - pad)
+                        py1 = max(0, int(bbox[1] * scale_y) - pad)
+                        px2 = min(cw, int(bbox[2] * scale_x) + pad)
+                        py2 = min(ch, int(bbox[3] * scale_y) + pad)
+
+                        if (px2 - px1) < 30 or (py2 - py1) < 20:
+                            continue
+
+                        crop_visual = img_cv[py1:py2, px1:px2]
+                        if crop_visual.size > 0:
+                            crop_fname = f"DOCX_TBL_{session_id}_p{page_idx}_t{t_idx}.png"
+                            crop_path = os.path.join(output_dir, crop_fname)
+                            cv2.imwrite(crop_path, crop_visual)
+
+                            from urllib.parse import quote
+                            crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                            table_crops.append({"crop_path": crop_path, "crop_url": crop_url})
+                            logger.info(f"  📊 Table crop: p{page_idx}_t{t_idx} ({px2-px1}x{py2-py1}px)")
+                except Exception as e_tbl:
+                    logger.warning(f"Table detection on page {page_idx}: {e_tbl}")
+
+                # ── Detect and crop FIGURES (embedded images in PDF) ──
+                try:
+                    if hasattr(page, 'images') and page.images:
+                        for f_idx, img_info in enumerate(page.images):
+                            ix0, iy0 = img_info.get('x0', 0), img_info.get('top', 0)
+                            ix1, iy1 = img_info.get('x1', 0), img_info.get('bottom', 0)
+
+                            if (ix1 - ix0) < 30 or (iy1 - iy0) < 30:
+                                continue  # Skip tiny icons/bullets
+
+                            pad = 5
+                            px1 = max(0, int(ix0 * scale_x) - pad)
+                            py1 = max(0, int(iy0 * scale_y) - pad)
+                            px2 = min(cw, int(ix1 * scale_x) + pad)
+                            py2 = min(ch, int(iy1 * scale_y) + pad)
+
+                            crop_visual = img_cv[py1:py2, px1:px2]
+                            if crop_visual.size > 0:
+                                crop_fname = f"DOCX_FIG_{session_id}_p{page_idx}_f{f_idx}.png"
+                                crop_path = os.path.join(output_dir, crop_fname)
+                                cv2.imwrite(crop_path, crop_visual)
+
+                                from urllib.parse import quote
+                                crop_url = f"http://127.0.0.1:8000/output/{quote(crop_fname)}"
+                                figure_crops.append({"crop_path": crop_path, "crop_url": crop_url})
+                                logger.info(f"  🖼️ Figure crop: p{page_idx}_f{f_idx} ({px2-px1}x{py2-py1}px)")
+                except Exception as e_fig:
+                    logger.warning(f"Figure detection on page {page_idx}: {e_fig}")
+
+        # ── Assign crops to uncropped elements (in document order) ──
+        t_idx = 0
+        for _, item in uncropped_tables:
+            if t_idx < len(table_crops):
+                item['crop_local'] = table_crops[t_idx]['crop_path']
+                item['crop_url'] = table_crops[t_idx]['crop_url']
+                crop_count += 1
+                t_idx += 1
+
+        f_idx = 0
+        for _, item in uncropped_figures:
+            if f_idx < len(figure_crops):
+                item['crop_local'] = figure_crops[f_idx]['crop_path']
+                item['crop_url'] = figure_crops[f_idx]['crop_url']
+                crop_count += 1
+                f_idx += 1
+
+    except Exception as e:
+        logger.warning(f"DOCX visual crop pipeline error: {e}")
+
+    logger.info(
+        f"✅ DOCX Visual Crop Complete: {crop_count} elements "
+        f"({len(table_crops)} tables, {len(figure_crops)} figures)"
+    )
+    return crop_count

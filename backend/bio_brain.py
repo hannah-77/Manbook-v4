@@ -22,24 +22,35 @@ class BioBrain:
     def __init__(self):
         # The 7 Standard Chapters (Fixed Schema)
         self.taxonomy = {
-            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "introduction", "overview"]},
-            "BAB 2": {"title": "Instalasi", "keywords": ["install", "setup", "pasang", "mounting", "connect", "power", "unboxing"]},
-            "BAB 3": {"title": "Panduan Operasional & Pemantauan Klinis", "keywords": ["operation", "operasional", "monitor", "display", "screen", "tombol", "measure", "klinis"]},
-            "BAB 4": {"title": "Perawatan, Pemeliharaan & Pembersihan", "keywords": ["maintenance", "clean", "bersih", "replace", "ganti", "battery", "care"]},
-            "BAB 5": {"title": "Pemecahan Masalah", "keywords": ["trouble", "masalah", "error", "fail", "rusak", "solution", "solusi"]},
-            "BAB 6": {"title": "Spesifikasi Teknis & Kepatuhan Standar", "keywords": ["spec", "tech", "data", "dimension", "weight", "standar", "iso", "iec"]},
-            "BAB 7": {"title": "Garansi & Layanan", "keywords": ["warrant", "garansi", "service", "layanan", "contact", "support"]},
+            "BAB 1": {"title": "Tujuan Penggunaan & Keamanan", "keywords": ["tujuan", "intended", "safety", "warning", "caution", "bahaya", "peringatan", "keamanan", "introduction", "overview", "notice", "precaution", "perhatian", "pencegahan", "danger", "hazard"]},
+            "BAB 2": {"title": "Instalasi", "keywords": ["install", "setup", "pasang", "mounting", "connect", "power", "unboxing", "rakit", "assembly"]},
+            "BAB 3": {"title": "Panduan Operasional & Pemantauan Klinis", "keywords": ["operation", "operasional", "monitor", "display", "screen", "tombol", "measure", "klinis", "prosedur", "langkah", "cara kerja", "penggunaan"]},
+            "BAB 4": {"title": "Perawatan, Pemeliharaan & Pembersihan", "keywords": ["maintenance", "clean", "bersih", "replace", "ganti", "battery", "care", "steril", "disinfeksi"]},
+            "BAB 5": {"title": "Pemecahan Masalah", "keywords": ["trouble", "masalah", "error", "fail", "rusak", "solution", "solusi", "alarm", "kode"]},
+            "BAB 6": {"title": "Spesifikasi Teknis & Kepatuhan Standar", "keywords": ["spec", "tech", "data", "dimension", "weight", "standar", "iso", "iec", "klasifikasi", "suhu"]},
+            "BAB 7": {"title": "Garansi & Layanan", "keywords": ["warrant", "garansi", "service", "layanan", "kontak", "distributor", "contact", "support", "permai", "osowilangun", "purna jual"]},
             
             # English Variants
-            "Chapter 1": {"title": "Intended Use & Safety", "keywords": ["purpose", "safety", "intended", "warning", "caution", "danger", "introduction", "overview"]},
-            "Chapter 2": {"title": "Installation", "keywords": ["install", "setup", "mounting", "connect", "power", "unboxing"]},
-            "Chapter 3": {"title": "Operation & Clinical Monitoring", "keywords": ["operation", "monitor", "display", "screen", "buttons", "measure", "clinical"]},
-            "Chapter 4": {"title": "Maintenance, Care & Cleaning", "keywords": ["maintenance", "cleaning", "care", "replace", "battery", "sterilize"]},
-            "Chapter 5": {"title": "Troubleshooting", "keywords": ["trouble", "error", "fail", "problem", "solution", "faq"]},
-            "Chapter 6": {"title": "Technical Specifications & Standards", "keywords": ["spec", "technical", "data", "dimension", "weight", "standards", "iso", "iec"]},
-            "Chapter 7": {"title": "Warranty & Service", "keywords": ["warranty", "guarantee", "service", "contact", "support"]}
+            "Chapter 1": {"title": "Intended Use & Safety", "keywords": ["purpose", "safety", "intended", "warning", "caution", "danger", "introduction", "overview", "notice", "precaution", "hazard"]},
+            "Chapter 2": {"title": "Installation", "keywords": ["install", "installation", "setup", "mounting", "connect", "power", "unboxing", "assembly"]},
+            "Chapter 3": {"title": "Operation & Clinical Monitoring", "keywords": ["operation", "monitor", "display", "screen", "buttons", "measure", "clinical", "procedure", "usage", "how to use"]},
+            "Chapter 4": {"title": "Maintenance, Care & Cleaning", "keywords": ["maintenance", "cleaning", "care", "replace", "battery", "sterilize", "disinfect"]},
+            "Chapter 5": {"title": "Troubleshooting", "keywords": ["trouble", "error", "fail", "problem", "solution", "faq", "alarm codes"]},
+            "Chapter 6": {"title": "Technical Specifications & Standards", "keywords": ["spec", "technical", "data", "dimension", "weight", "standards", "iso", "iec", "environmental"]},
+            "Chapter 7": {
+                "title": "Warranty & Service",
+                "keywords": ['warranty', 'service', 'support', 'contact', 'distributor', 'repair', 'after sales', 'guarantees', 'guarantee', 'osowilangun', 'permai']
+            }
         }
         self.current_context = "BAB 1"
+        self.spell = None
+        # Note: spell checker is fully initialized in reset_context()
+
+        
+    def reset_context(self):
+        """Reset classification state for a new document."""
+        self.current_context = "BAB 1"
+        logger.info("🔄 Brain context reset to BAB 1")
         
         # Initialize Spell Checker
         try:
@@ -226,43 +237,129 @@ class BioBrain:
 
     def semantic_mapping(self, item):
         """
-        Memetakan konten ke dalam 7 BAB.
-        Logika:
-        1. Cek Header Eksplisit ("BAB 2", "Chapter 5").
-        2. Cek Kesamaan Judul (Title Matching).
-        3. Cek Kata Kunci Konten (Content Keywords).
-        4. Context Persistence (Jika ragu, ikut bab sebelumnya).
+        Ultimate Semantic Mapping using Regex + Hard-Switch logic.
         """
-        text = item['text'].lower()
-        rtype = item['type']
+        import re
+        text = (item.get('text') or "").lower()
+        rtype = item.get('type', 'text')
         
-        # 1. Explicit Headers (Absolute Priority)
+        # 1. Explicit Headers (Absolute Priority) - e.g., "BAB 2", "Chapter 2", "8AB 2"
         for i in range(1, 8):
-            key = f"BAB {i}"
-            if key.lower() in text or f"chapter {i}" in text:
+            # Catch common OCR misreads like '8AB', 'B4B', 'Chapt', 'Ch.'
+            if re.search(rf'\b(bab|chapter|bagian|section|8ab|b4b|chapt|ch\.)\s*{i}\b', text):
+                # Use BAB X as internal standard
+                key = f"BAB {i}" 
+                if (f"Chapter {i}" in self.taxonomy) and (re.search(r'chapter|chapt|ch\.', text)):
+                    key = f"Chapter {i}"
+                
+                logger.info(f"📍 Context Switch: Found Explicit Header '{text.upper()}' -> {key}")
                 self.current_context = key
-                return key, self.taxonomy[key]["title"]
+                return key, self.taxonomy.get(key, {}).get("title", "Unknown")
 
-        # 2. Title Analysis
-        if rtype == 'title':
-            best_match = None
-            max_score = 0
-            for code, meta in self.taxonomy.items():
-                # Count keyword hits
-                hits = sum(1 for k in meta['keywords'] if k in text)
-                if hits > max_score:
-                    max_score = hits
-                    best_match = code
-            
-            if best_match and max_score >= 1:
-                self.current_context = best_match
+        # 2. Hard-Switch Keywords (Priority 2)
+        # If these appear in a title/heading, we MUST switch immediately.
+        hard_switches = {
+            "BAB 1": [r'\bintended', r'\btujuan', r'\bsafety', r'\bkeamanan', r'\bwarning', r'\bperingatan', r'\bintro', r'\bnotice', r'\bprecaution', r'\bpencegahan', r'\bbahaya', r'\bdanger', r'\bhazard'],
+            "BAB 2": [r'\binstall', r'\bpasang', r'\bsetup', r'\bassembly', r'\bmerakit'],
+            "BAB 3": [r'\boperation', r'\boperasional', r'\bmonitor', r'\buse', r'\bpenggunaan', r'\binstruksi', r'\bmanual'],
+            "BAB 4": [r'\bmaintenance', r'\bperawatan', r'\bpemeliharaan', r'\bclean', r'\bbersih', r'\bsteril'],
+            "BAB 5": [r'\btrouble', r'\bmasalah', r'\berror', r'\bsolusi', r'\bkerusakan'],
+            "BAB 6": [r'\bspecification', r'\bspesifikasi', r'\bteknis', r'\btechnical', r'\bdata sheet'],
+            "BAB 7": [r'\bwarranty', r'\bgaransi', r'\bservice', r'\blayanan', r'\bkontak', r'\bcontact', r'\bsupport']
+        }
         
-        # 3. Content Analysis (Switch context only on strong signal)
-        elif rtype == 'text':
-             for code, meta in self.taxonomy.items():
-                hits = sum(1 for k in meta['keywords'] if k in text)
-                if hits >= 3:  # Butuh setidaknya 3 keywords untuk pindah bab di tengah teks
-                     self.current_context = code
+        if rtype in ('title', 'heading'):
+            for code, patterns in hard_switches.items():
+                for p in patterns:
+                    if re.search(p, text):
+                        # Map internal BAB code to taxonomy keys
+                        target_key = code
+                        # Handle Chapter mapping if the doc seems to use English chapters
+                        if self.current_context.startswith("Chapter") and f"Chapter {code[-1]}" in self.taxonomy:
+                            target_key = f"Chapter {code[-1]}"
+                        
+                        logger.info(f"📍 Context Switch: Hard-Switch Keyword '{p}' found in heading -> {target_key}")
+                        self.current_context = target_key
+                        return self.current_context, self.taxonomy[target_key]["title"]
 
-        # Return Decision
-        return self.current_context, self.taxonomy[self.current_context]["title"]
+        # 2b. Safety Content Detection (Priority 2b)
+        # WARNING/CAUTION/NOTICE blocks belong in BAB 1 even as paragraphs.
+        # These are standalone safety labels that often appear as bold text blocks,
+        # not inside headings. We check ALL element types, not just title/heading.
+        safety_patterns = [
+            r'^\s*warning\b',        # Starts with "WARNING"
+            r'^\s*caution\b',        # Starts with "CAUTION"
+            r'^\s*danger\b',         # Starts with "DANGER"
+            r'^\s*notice\b',         # Starts with "NOTICE"
+            r'^\s*user\s+notice\b',  # Starts with "USER NOTICE"
+            r'^\s*peringatan\b',     # Starts with "PERINGATAN"
+            r'^\s*perhatian\b',      # Starts with "PERHATIAN"
+            r'^\s*bahaya\b',         # Starts with "BAHAYA"
+            r'^\s*tindakan\s+pencegahan\b',  # Starts with "TINDAKAN PENCEGAHAN"
+        ]
+        for sp in safety_patterns:
+            if re.search(sp, text):
+                target_key = "BAB 1"
+                if self.current_context.startswith("Chapter") and "Chapter 1" in self.taxonomy:
+                    target_key = "Chapter 1"
+                logger.info(f"📍 Safety Content: '{text[:50]}...' -> {target_key}")
+                self.current_context = target_key
+                return self.current_context, self.taxonomy[target_key]["title"]
+
+        # 3. Dynamic Keyword Scoring (Priority 3)
+        best_match = None
+        max_score = 0
+        
+        for code, meta in self.taxonomy.items():
+            score = 0
+            for k in meta['keywords']:
+                if re.search(rf'\b{re.escape(k)}', text):
+                    score += 1
+            
+            if score > max_score:
+                max_score = score
+                best_match = code
+        
+        # Thresholds for change
+        if rtype in ('title', 'heading') and max_score >= 1:
+            self.current_context = best_match
+        elif max_score >= 2:
+            self.current_context = best_match
+            
+        return self.current_context, self.taxonomy.get(self.current_context, {}).get("title", "Unknown")
+
+    def classify_chapter_ai(self, text, current_chapter, lang="id"):
+        """
+        Use Gemini AI to classify which chapter the text belongs to.
+        Returns code (e.g. 'BAB 2') or None.
+        """
+        try:
+            from openrouter_client import get_openrouter_client
+            client = get_openrouter_client()
+            if not client: return None
+            
+            chapters_summary = "\n".join([f"{k}: {v['title']}" for k, v in self.taxonomy.items() if "BAB" in k])
+            
+            prompt = f"""Identify which chapter this text belongs to in a technical manual.
+Chapters:
+{chapters_summary}
+
+Text: "{text}"
+
+Current Context: {current_chapter}
+
+Guidelines:
+- If the text is a new heading, assign the most relevant BAB.
+- If it's ambiguous, return the current context.
+- Return ONLY the chapter code (e.g. 'BAB 4').
+
+Result:"""
+            result = client.call(prompt, timeout=10).strip()
+            # Extract pattern like BAB 1 or Chapter 1
+            match = re.search(r'(BAB|Chapter)\s*(\d)', result, re.IGNORECASE)
+            if match:
+                code = f"BAB {match.group(2)}"
+                return code
+        except Exception as e:
+            logger.warning(f"AI classification failed: {e}")
+        return None
